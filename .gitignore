@@ -1,0 +1,12 @@
+# Go (binary at repo root only — must not match cmd/oc-review-bot/)
+/oc-review-bot
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Web
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+*.tsbuildinfo
