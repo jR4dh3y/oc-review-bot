@@ -5,13 +5,15 @@ export interface Me {
   is_admin: boolean;
 }
 
+export type ReviewStatus = "queued" | "running" | "done" | "failed" | (string & {});
+
 export interface ReviewListItem {
   id: number;
   repo_full: string;
   pr_number: number;
   head_sha: string;
   requester_login: string;
-  status: "queued" | "running" | "done" | "failed" | string;
+  status: ReviewStatus;
   model: string;
   summary_md: string;
   error: string;
@@ -31,9 +33,34 @@ export interface Finding {
   posted_comment_id?: number;
 }
 
+interface FindingResponse {
+  id?: number;
+  ID?: number;
+  review_id?: number;
+  ReviewID?: number;
+  path?: string;
+  Path?: string;
+  line?: number;
+  Line?: number;
+  side?: string;
+  Side?: string;
+  severity?: string;
+  Severity?: string;
+  body?: string;
+  body_md?: string;
+  BodyMD?: string;
+  posted_comment_id?: number;
+  PostedCommentID?: number;
+}
+
 export interface ReviewDetail {
   review: ReviewListItem;
   findings: Finding[];
+}
+
+interface ReviewDetailResponse {
+  review: ReviewListItem;
+  findings: FindingResponse[] | null;
 }
 
 export interface ZenKey {
@@ -46,42 +73,130 @@ export interface ZenKey {
   created_at: string;
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    headers: { "content-type": "application/json" },
-    ...init,
-  });
-  if (res.status === 401) throw new Error("unauthorized");
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((body as { error?: string }).error ?? `request failed: ${res.status}`);
+export interface Settings {
+  model: string;
+}
+
+export interface KeyCreateResult {
+  id: number;
+  label: string;
+  last4: string;
+}
+
+export interface ActionResult {
+  ok: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
   }
+}
+
+export const authenticationRequiredEvent = "oc-review-bot:authentication-required";
+
+export function notifyAuthenticationRequired() {
+	if (typeof window !== "undefined") {
+		window.dispatchEvent(new Event(authenticationRequiredEvent));
+	}
+}
+
+function isErrorResponse(value: unknown): value is { error: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "error" in value &&
+    typeof (value as { error?: unknown }).error === "string"
+  );
+}
+
+async function responseErrorMessage(res: Response) {
+  const body = await res.json().catch(() => null);
+  return isErrorResponse(body) ? body.error : res.statusText || `Request failed (${res.status})`;
+}
+
+async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body != null && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+
+  const res = await fetch(path, {
+    ...init,
+    credentials: "same-origin",
+    headers,
+	});
+	if (!res.ok) {
+		const error = new ApiError(await responseErrorMessage(res), res.status);
+		if (error.status === 401) notifyAuthenticationRequired();
+		throw error;
+	}
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
+export function isUnauthenticatedError(error: unknown) {
+  return isApiError(error) && error.status === 401;
+}
+
+export function isRetryableError(error: unknown) {
+  if (!isApiError(error)) return true;
+  return error.status === 408 || error.status === 429 || error.status >= 500;
+}
+
+export function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function normalizeFinding(finding: FindingResponse): Finding {
+  return {
+    id: finding.id ?? finding.ID,
+    review_id: finding.review_id ?? finding.ReviewID,
+    path: finding.path ?? finding.Path ?? "",
+    line: finding.line ?? finding.Line ?? 0,
+    side: finding.side ?? finding.Side ?? "",
+    severity: finding.severity ?? finding.Severity ?? "",
+    body: finding.body ?? finding.body_md ?? finding.BodyMD ?? "",
+    posted_comment_id: finding.posted_comment_id ?? finding.PostedCommentID,
+  };
 }
 
 export const api = {
   me: () => req<Me>("/api/me"),
   reviews: () => req<ReviewListItem[]>("/api/reviews"),
-  reviewDetail: (id: number | string) => req<ReviewDetail>(`/api/reviews/${id}`),
+  reviewDetail: async (id: number | string): Promise<ReviewDetail> => {
+    const detail = await req<ReviewDetailResponse>(`/api/reviews/${id}`);
+    return { review: detail.review, findings: (detail.findings ?? []).map(normalizeFinding) };
+  },
   keys: () => req<ZenKey[]>("/api/admin/keys"),
   addKey: (label: string, secret: string) =>
-    req<{ id: number; label: string; last4: string }>("/api/admin/keys", {
+    req<KeyCreateResult>("/api/admin/keys", {
       method: "POST",
       body: JSON.stringify({ label, secret }),
     }),
   patchKey: (id: number, disabled: boolean) =>
-    req<{ ok: string }>(`/api/admin/keys/${id}`, {
+    req<ActionResult>(`/api/admin/keys/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ disabled }),
     }),
   deleteKey: (id: number) =>
-    req<{ ok: string }>(`/api/admin/keys/${id}`, { method: "DELETE" }),
-  settings: () => req<{ model: string }>("/api/admin/settings"),
+    req<ActionResult>(`/api/admin/keys/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify({}),
+    }),
+  settings: () => req<Settings>("/api/admin/settings"),
   saveSettings: (model: string) =>
-    req<{ ok: string }>("/api/admin/settings", {
+    req<ActionResult>("/api/admin/settings", {
       method: "POST",
       body: JSON.stringify({ model }),
     }),
-  logout: () => req<{ ok: string }>("/auth/logout", { method: "POST" }),
+  logout: () => req<ActionResult>("/auth/logout", { method: "POST" }),
 };

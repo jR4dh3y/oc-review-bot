@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "ports": {"preview": 5173, "additional": {}},
+  "scripts": {
+    "setup": {"enabled": true, "command": "make setup"},
+    "run": {"enabled": true, "command": "mise exec -- bun run --cwd web dev --host 0.0.0.0"},
+    "archive": {"enabled": true, "command": null},
+    "check": {"enabled": true, "command": "mise exec -- make check"}
+  },
+  "mcpServers": []
+}

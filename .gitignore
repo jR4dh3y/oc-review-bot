@@ -1,9 +1,28 @@
+# Local environment and credentials. Keep .env.example as the documented template.
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pkcs12
+
 # Go (binary at repo root only — must not match cmd/oc-review-bot/)
 /oc-review-bot
+/bin/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+/data/
+*.coverprofile
+coverage.out
+*.test
 
 # Web
 web/node_modules/

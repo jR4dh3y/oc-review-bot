@@ -2,6 +2,7 @@ package pool
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,5 +73,61 @@ func TestExhaustedCoolsDown(t *testing.T) {
 	}
 	if _, err := p.Acquire(); !errors.Is(err, ErrEmpty) {
 		t.Fatalf("err = %v, want ErrEmpty", err)
+	}
+}
+
+func TestNewUsesFixedDefaultCooldown(t *testing.T) {
+	p := New(poolStore(t), 0)
+	if p.CooldownOnExhausted != defaultCooldown {
+		t.Fatalf("default cooldown = %s, want %s", p.CooldownOnExhausted, defaultCooldown)
+	}
+}
+
+func TestAcquireAtomicallyBalancesConcurrentWorkers(t *testing.T) {
+	s := poolStore(t)
+	for _, label := range []string{"a", "b", "c"} {
+		if _, err := s.AddKey(label, "sk-"+label+"1234"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := New(s, time.Hour)
+
+	const requests = 30
+	start := make(chan struct{})
+	keys := make(chan int64, requests)
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			key, err := p.Acquire()
+			if err != nil {
+				errs <- err
+				return
+			}
+			keys <- key.ID
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(keys)
+	close(errs)
+
+	for err := range errs {
+		t.Fatal(err)
+	}
+	counts := map[int64]int{}
+	for id := range keys {
+		counts[id]++
+	}
+	if len(counts) != 3 {
+		t.Fatalf("used %d keys, want 3", len(counts))
+	}
+	for id, count := range counts {
+		if count != requests/3 {
+			t.Fatalf("key %d used %d times, want %d", id, count, requests/3)
+		}
 	}
 }

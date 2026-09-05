@@ -1,6 +1,7 @@
 package review
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -52,6 +53,106 @@ func TestExtractReviewDefaultSide(t *testing.T) {
 	}
 }
 
+func TestExtractReviewNormalizesAndAllowlistsFindingFields(t *testing.T) {
+	out := fencedJSON(t, map[string]any{
+		"summary": "s",
+		"findings": []any{
+			map[string]any{"path": "a.go", "line": 3, "side": " right ", "severity": " WARNING ", "body": "valid"},
+			map[string]any{"path": "b.go", "line": 4, "side": "MIDDLE", "severity": "info", "body": "invalid side"},
+			map[string]any{"path": "c.go", "line": 5, "side": "LEFT", "severity": "urgent", "body": "invalid severity"},
+		},
+	})
+
+	r := ExtractReview(out)
+	if len(r.Findings) != 1 {
+		t.Fatalf("want one allowlisted finding, got %+v", r.Findings)
+	}
+	if got := r.Findings[0]; got.Side != "RIGHT" || got.Severity != "warning" {
+		t.Fatalf("finding fields not normalized: %+v", got)
+	}
+}
+
+func TestExtractReviewRejectsNullAndUnsafeFindingFields(t *testing.T) {
+	out := fencedJSON(t, map[string]any{
+		"summary": "s",
+		"findings": []any{
+			map[string]any{"path": "valid.go", "line": 1, "side": "RIGHT", "severity": "info", "body": "valid"},
+			map[string]any{"path": "null-side.go", "line": 2, "side": nil, "severity": "info", "body": "invalid"},
+			map[string]any{"path": "null-severity.go", "line": 3, "side": "RIGHT", "severity": nil, "body": "invalid"},
+			map[string]any{"path": "wrong-side.go", "line": 4, "side": []string{"RIGHT"}, "severity": "info", "body": "invalid"},
+			map[string]any{"path": "wrong-line.go", "line": 5.5, "side": "RIGHT", "severity": "info", "body": "invalid"},
+			map[string]any{"path": "control-body.go", "line": 6, "side": "RIGHT", "severity": "info", "body": "unsafe\x00body"},
+		},
+	})
+
+	r := ExtractReview(out)
+	if len(r.Findings) != 1 || r.Findings[0].Path != "valid.go" {
+		t.Fatalf("malformed findings were retained: %+v", r.Findings)
+	}
+}
+
+func TestExtractReviewDropsMalformedAndUnsafeFindings(t *testing.T) {
+	out := fencedJSON(t, map[string]any{
+		"summary": "s",
+		"findings": []any{
+			map[string]any{"path": "good.go", "line": 1, "side": "RIGHT", "severity": "info", "body": "valid"},
+			map[string]any{"path": "wrong-type.go", "line": "2", "side": "RIGHT", "severity": "info", "body": "malformed"},
+			"not a finding",
+			map[string]any{"path": "../escape.go", "line": 3, "side": "RIGHT", "severity": "info", "body": "unsafe path"},
+			map[string]any{"path": "/absolute.go", "line": 4, "side": "RIGHT", "severity": "info", "body": "unsafe path"},
+			map[string]any{"path": "nested/../file.go", "line": 5, "side": "RIGHT", "severity": "info", "body": "unsafe path"},
+			map[string]any{"path": "negative.go", "line": -1, "side": "RIGHT", "severity": "info", "body": "bad line"},
+			map[string]any{"path": "empty.go", "line": 6, "side": "RIGHT", "severity": "info", "body": "\u0000"},
+		},
+	})
+
+	r := ExtractReview(out)
+	if len(r.Findings) != 1 || r.Findings[0].Path != "good.go" {
+		t.Fatalf("unsafe findings were retained: %+v", r.Findings)
+	}
+}
+
+func TestExtractReviewBoundsUntrustedOutput(t *testing.T) {
+	findings := []any{
+		map[string]any{
+			"path":     strings.Repeat("p", maxFindingPathBytes+1),
+			"line":     1,
+			"side":     "RIGHT",
+			"severity": "info",
+			"body":     "path is too long",
+		},
+	}
+	for i := 0; i < maxFindings+2; i++ {
+		findings = append(findings, map[string]any{
+			"path":     "file.go",
+			"line":     i + 1,
+			"side":     "RIGHT",
+			"severity": "info",
+			"body":     strings.Repeat("b", maxFindingBodyBytes+128),
+		})
+	}
+	out := fencedJSON(t, map[string]any{
+		"summary":  strings.Repeat("s", maxSummaryBytes+128),
+		"findings": findings,
+	})
+
+	r := ExtractReview(out)
+	if len(r.SummaryMD) != maxSummaryBytes || !strings.HasSuffix(r.SummaryMD, truncationMarker) {
+		t.Fatalf("summary was not safely bounded: len=%d summary=%q", len(r.SummaryMD), r.SummaryMD)
+	}
+	if len(r.Findings) != maxFindings {
+		t.Fatalf("want %d bounded findings, got %d", maxFindings, len(r.Findings))
+	}
+	for _, finding := range r.Findings {
+		if len(finding.Path) > maxFindingPathBytes || len(finding.Body) > maxFindingBodyBytes {
+			t.Fatalf("finding exceeds output bounds: %+v", finding)
+		}
+		if !strings.HasSuffix(finding.Body, truncationMarker) {
+			t.Fatalf("oversized body was not truncated: %q", finding.Body)
+		}
+	}
+}
+
 func TestExtractReviewNoContract(t *testing.T) {
 	out := "The PR looks great overall, ship it.\nSecond line."
 	r := ExtractReview(out)
@@ -74,6 +175,23 @@ func TestExtractReviewIgnoresInvalidJSON(t *testing.T) {
 	r := ExtractReview(out)
 	if r.SummaryMD != out {
 		t.Fatalf("invalid block should fall back to raw text, got %q", r.SummaryMD)
+	}
+}
+
+func TestExtractReviewIgnoresNonJSONFences(t *testing.T) {
+	out := "```yaml\n{\"summary\": \"not a review\", \"findings\": []}\n```"
+	r := ExtractReview(out)
+	if r.SummaryMD != out || len(r.Findings) != 0 {
+		t.Fatalf("non-JSON fence was accepted: %+v", r)
+	}
+}
+
+func TestExtractReviewFindsJSONAfterOtherFences(t *testing.T) {
+	out := "```yaml\nsummary: example\n```\n" +
+		"```json\n{\"summary\": \"review\", \"findings\": []}\n```"
+	r := ExtractReview(out)
+	if r.SummaryMD != "review" || len(r.Findings) != 0 {
+		t.Fatalf("JSON contract after another fence was missed: %+v", r)
 	}
 }
 
@@ -125,6 +243,12 @@ func TestDiffIndexMapping(t *testing.T) {
 	if idx.InDiff("nope.go", "RIGHT", 1) || idx.InDiff("internal/cache/cache.go", "RIGHT", 999) {
 		t.Fatal("out-of-diff line reported as in diff")
 	}
+	if idx.InDiff("internal/cache/cache.go", "MIDDLE", 11) {
+		t.Fatal("invalid side must not be treated as RIGHT")
+	}
+	if !idx.InDiff("internal/cache/cache.go", " right ", 11) {
+		t.Fatal("normalized RIGHT side should be accepted")
+	}
 }
 
 func TestHunkHeaderVariants(t *testing.T) {
@@ -134,6 +258,16 @@ func TestHunkHeaderVariants(t *testing.T) {
 	}
 	if !idx.InDiff("a.go", "LEFT", 3) {
 		t.Fatal("old side start misparsed")
+	}
+}
+
+func TestDiffIndexRejectsUnsafeFilePaths(t *testing.T) {
+	idx := NewDiffIndex([]gh.File{{
+		Filename: "../outside.go",
+		Patch:    "@@ -0,0 +1 @@\n+unsafe\n",
+	}})
+	if len(idx.files) != 0 {
+		t.Fatalf("unsafe filename was indexed: %+v", idx.files)
 	}
 }
 
@@ -159,4 +293,61 @@ func TestRenderInlineBody(t *testing.T) {
 	if !strings.HasPrefix(got, "🔴 **critical**\n\nSQL injection") {
 		t.Fatalf("inline body = %q", got)
 	}
+}
+
+func TestRenderSummaryCommentDropsUnsafeFindings(t *testing.T) {
+	result := ReviewResult{
+		SummaryMD: "summary",
+		Findings: []Finding{
+			{Path: "valid.go", Line: 1, Side: "RIGHT", Severity: "info", Body: "valid"},
+			{Path: "invalid-side.go", Line: 2, Side: "MIDDLE", Severity: "info", Body: "invalid"},
+			{Path: "invalid-severity.go", Line: 3, Side: "RIGHT", Severity: "urgent", Body: "invalid"},
+			{Path: "../invalid-path.go", Line: 4, Side: "RIGHT", Severity: "info", Body: "invalid"},
+			{Path: "invalid-body.go", Line: 5, Side: "RIGHT", Severity: "info", Body: "unsafe\x00body"},
+		},
+	}
+
+	out := RenderSummaryComment(result, "oc-review-bot", "model")
+	if !strings.Contains(out, "valid.go:1") {
+		t.Fatalf("valid finding missing: %q", out)
+	}
+	for _, path := range []string{"invalid-side.go", "invalid-severity.go", "invalid-path.go", "invalid-body.go"} {
+		if strings.Contains(out, path) {
+			t.Fatalf("unsafe finding was rendered for %q: %q", path, out)
+		}
+	}
+}
+
+func TestRenderedCommentsStayWithinGitHubLimit(t *testing.T) {
+	findings := make([]Finding, maxFindings)
+	for i := range findings {
+		findings[i] = Finding{
+			Path:     "file.go",
+			Line:     int64(i + 1),
+			Side:     "RIGHT",
+			Severity: "info",
+			Body:     strings.Repeat("x\n", maxFindingBodyBytes),
+		}
+	}
+	result := ReviewResult{
+		SummaryMD: strings.Repeat("s", maxSummaryBytes*2),
+		Findings:  findings,
+	}
+	if got := RenderInlineBody(Finding{Body: strings.Repeat("x", maxGitHubCommentBytes)}); len(got) > maxGitHubCommentBytes {
+		t.Fatalf("inline body exceeds GitHub limit: %d", len(got))
+	}
+	if got := RenderSummaryComment(result, "oc-review-bot", "model"); len(got) > maxGitHubCommentBytes {
+		t.Fatalf("summary body exceeds GitHub limit: %d", len(got))
+	} else if !strings.Contains(got, "Reviewed by oc-review-bot") {
+		t.Fatalf("summary footer was truncated: %q", got)
+	}
+}
+
+func fencedJSON(t *testing.T, value any) string {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal review output: %v", err)
+	}
+	return "```json\n" + string(body) + "\n```"
 }

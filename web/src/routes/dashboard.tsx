@@ -1,8 +1,13 @@
-import { Link, createRoute, useParams } from "@tanstack/react-router";
+import { Link, createRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft } from "lucide-react";
 import { Route as RootRoute } from "./__root";
-import { api } from "@/lib/api";
+import { RequireUser } from "@/components/auth-gate";
+import { LoadingState, RequestError } from "@/components/query-state";
+import { api, getErrorMessage, isApiError, type ReviewStatus } from "@/lib/api";
+import { userQueryKey, userReviewQueryKey, useCurrentUser, useUnauthorizedRedirect } from "@/lib/auth";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export const Route = createRoute({
@@ -11,7 +16,13 @@ export const Route = createRoute({
   component: Dashboard,
 });
 
-function statusVariant(status: string) {
+export const ReviewDetailRoute = createRoute({
+  getParentRoute: () => RootRoute,
+  path: "/dashboard/$reviewId",
+  component: ReviewDetailPage,
+});
+
+function statusVariant(status: ReviewStatus) {
   switch (status) {
     case "done":
       return "success" as const;
@@ -25,105 +36,208 @@ function statusVariant(status: string) {
 }
 
 function Dashboard() {
-  const reviews = useQuery({
-    queryKey: ["reviews"],
-    queryFn: api.reviews,
-    refetchInterval: 5000,
-  });
-
   return (
-    <div className="grid gap-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Reviews</CardTitle>
-          <CardDescription>Latest 50 reviews, auto-refreshing every 5s.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {reviews.isPending && <p className="text-sm text-zinc-500">Loading…</p>}
-          {reviews.isError && (
-            <p className="text-sm">
-              Login required.{" "}
-              <a className="underline" href="/auth/github/login">
-                Login with GitHub
-              </a>
-            </p>
-          )}
-          <ul className="divide-y divide-zinc-100">
-            {reviews.data?.map((r) => (
-              <li key={r.id} className="flex items-center gap-3 py-2.5 text-sm">
-                <Badge variant={statusVariant(r.status)}>{r.status}</Badge>
-                <Link to="/dashboard/$reviewId" params={{ reviewId: String(r.id) }} className="font-medium hover:underline">
-                  {r.repo_full}#{r.pr_number}
-                </Link>
-                <span className="hidden text-zinc-500 sm:inline">
-                  by {r.requester_login} · {r.findings_count} findings · {r.model}
-                </span>
-                <span className="ml-auto shrink-0 text-xs text-zinc-400">
-                  {new Date(r.created_at).toLocaleString()}
-                </span>
-              </li>
-            ))}
-          </ul>
-          {reviews.data?.length === 0 && (
-            <p className="text-sm text-zinc-500">
-              No reviews yet. Comment <code>@oc-review-bot</code> on a PR to trigger one.
-            </p>
-          )}
-        </CardContent>
-      </Card>
-      <ReviewDetailPanel />
-    </div>
+    <RequireUser>
+      <ReviewList />
+    </RequireUser>
   );
 }
 
-function ReviewDetailPanel() {
-  const params = useParams({ strict: false }) as { reviewId?: string };
-  const reviewId = params.reviewId;
-  const detail = useQuery({
-    queryKey: ["review", reviewId],
-    queryFn: () => api.reviewDetail(reviewId as string),
-    enabled: Boolean(reviewId),
+function ReviewList() {
+  const currentUser = useCurrentUser();
+  const userID = currentUser.data?.id;
+  const reviews = useQuery({
+    queryKey: userID == null ? ["reviews", "anonymous"] : userQueryKey("reviews", userID),
+    queryFn: api.reviews,
+    enabled: userID != null,
+    refetchInterval: (query) =>
+      query.state.data?.some(
+        (review) => review.status === "queued" || review.status === "running",
+      )
+        ? 5_000
+        : false,
   });
-  if (!reviewId) return null;
+  const sessionExpired = useUnauthorizedRedirect(reviews.error);
+
   return (
-    <Card>
+    <Card aria-busy={reviews.isFetching}>
       <CardHeader>
-        <CardTitle className="text-base">Review #{reviewId}</CardTitle>
-        <CardDescription>{detail.data?.review.summary_md?.slice(0, 160)}</CardDescription>
+        <CardTitle as="h1">Reviews</CardTitle>
+        <CardDescription>
+          Latest 50 review requests. Queued and running reviews refresh every five seconds.
+        </CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-3 text-sm">
-        {detail.isPending && <p className="text-zinc-500">Loading detail…</p>}
-        {detail.data && (
-          <>
-            <pre className="whitespace-pre-wrap rounded-md bg-zinc-950 p-4 text-xs text-zinc-100">
-              {detail.data.review.summary_md || "(no summary)"}
-            </pre>
-            {detail.data.review.error && (
-              <p className="rounded-md bg-red-50 p-3 text-red-700">{detail.data.review.error}</p>
-            )}
-            <ul className="grid gap-2">
-              {detail.data.findings.map((f, i) => (
-                <li key={i} className="rounded-md border border-zinc-200 p-3">
-                  <div className="flex items-center gap-2 text-xs text-zinc-500">
-                    <Badge variant="outline">
-                      {f.path}:{f.line}
-                    </Badge>
-                    <Badge variant="secondary">{f.severity}</Badge>
-                    <span>{f.side}</span>
+      <CardContent>
+        {reviews.isPending ? (
+          <LoadingState>Loading review requests…</LoadingState>
+        ) : sessionExpired ? (
+          <LoadingState>Your session has ended. Returning you to sign in…</LoadingState>
+        ) : reviews.isError ? (
+          <RequestError
+            title="Couldn’t load reviews"
+            description={getErrorMessage(reviews.error, "Try again in a moment.")}
+            onRetry={() => void reviews.refetch()}
+          />
+        ) : reviews.data?.length ? (
+          <ul className="divide-y divide-zinc-100" aria-label="Recent review requests">
+            {reviews.data.map((review) => {
+              const createdAt = formatDateTime(review.created_at);
+              return (
+                <li key={review.id} className="flex items-start gap-3 py-3 text-sm">
+                  <Badge variant={statusVariant(review.status)} className="mt-0.5 shrink-0">
+                    {review.status}
+                  </Badge>
+                  <div className="min-w-0 flex-1">
+                    <Link
+                      to="/dashboard/$reviewId"
+                      params={{ reviewId: String(review.id) }}
+                      className="break-words font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950 focus-visible:ring-offset-2"
+                    >
+                      {review.repo_full}#{review.pr_number}
+                    </Link>
+                    <p className="mt-1 break-words text-xs text-zinc-500">
+                      Requested by {review.requester_login} · {formatFindingCount(review.findings_count)} · {review.model}
+                    </p>
                   </div>
-                  <p className="mt-1.5">{f.body}</p>
+                  <time dateTime={createdAt.dateTime} className="shrink-0 text-right text-xs text-zinc-400">
+                    {createdAt.label}
+                  </time>
                 </li>
-              ))}
-            </ul>
-          </>
+              );
+            })}
+          </ul>
+        ) : (
+          <div className="rounded-md border border-dashed border-zinc-300 p-4 text-sm text-zinc-600">
+            <p className="font-medium text-zinc-900">No review requests yet.</p>
+            <p className="mt-1">
+              After registering, mention <code className="rounded bg-zinc-100 px-1">@oc-review-bot</code>{" "}
+              on a pull request in an installed repository.
+            </p>
+          </div>
         )}
       </CardContent>
     </Card>
   );
 }
 
-export const ReviewDetailRoute = createRoute({
-  getParentRoute: () => RootRoute,
-  path: "/dashboard/$reviewId",
-  component: Dashboard,
-});
+function ReviewDetailPage() {
+  return (
+    <RequireUser>
+      <ReviewDetail />
+    </RequireUser>
+  );
+}
+
+function ReviewDetail() {
+  const { reviewId } = ReviewDetailRoute.useParams();
+  const currentUser = useCurrentUser();
+  const userID = currentUser.data?.id;
+  const detail = useQuery({
+    queryKey:
+      userID == null ? ["review", "anonymous", reviewId] : userReviewQueryKey(userID, reviewId),
+    queryFn: () => api.reviewDetail(reviewId),
+    enabled: userID != null,
+  });
+  const sessionExpired = useUnauthorizedRedirect(detail.error);
+
+  return (
+    <Card aria-busy={detail.isFetching}>
+      <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="grid gap-1.5">
+          <CardTitle as="h1">Review #{reviewId}</CardTitle>
+          <CardDescription>
+            {detail.data
+              ? `${detail.data.review.repo_full}#${detail.data.review.pr_number}`
+              : "Review details and inline findings."}
+          </CardDescription>
+        </div>
+        <Button variant="outline" size="sm" asChild>
+          <Link to="/dashboard">
+            <ArrowLeft aria-hidden="true" /> Back to reviews
+          </Link>
+        </Button>
+      </CardHeader>
+      <CardContent className="grid gap-3 text-sm">
+        {detail.isPending ? (
+          <LoadingState>Loading review details…</LoadingState>
+        ) : sessionExpired ? (
+          <LoadingState>Your session has ended. Returning you to sign in…</LoadingState>
+        ) : detail.isError ? (
+          <RequestError
+            title={
+              isApiError(detail.error) && detail.error.status === 404
+                ? "Review not found"
+                : "Couldn’t load this review"
+            }
+            description={
+              isApiError(detail.error) && detail.error.status === 404
+                ? "This review may have been removed."
+                : getErrorMessage(detail.error, "Try again in a moment.")
+            }
+            onRetry={() => void detail.refetch()}
+          />
+        ) : detail.data ? (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={statusVariant(detail.data.review.status)}>
+                {detail.data.review.status}
+              </Badge>
+              <span className="break-words text-xs text-zinc-500">{detail.data.review.model}</span>
+            </div>
+            {detail.data.review.error && (
+              <p className="rounded-md border border-red-200 bg-red-50 p-3 text-red-700" role="alert">
+                {detail.data.review.error}
+              </p>
+            )}
+            <section aria-labelledby="review-summary">
+              <h2 id="review-summary" className="mb-2 text-sm font-semibold">
+                Summary
+              </h2>
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-950 p-4 text-xs text-zinc-100">
+                {detail.data.review.summary_md || "(No summary was returned.)"}
+              </pre>
+            </section>
+            <section aria-labelledby="review-findings">
+              <h2 id="review-findings" className="mb-2 text-sm font-semibold">
+                Inline findings
+              </h2>
+              {detail.data.findings.length ? (
+                <ul className="grid gap-2">
+                  {detail.data.findings.map((finding, index) => (
+                    <li
+                      key={finding.id ?? `${finding.path}-${finding.line}-${finding.side}-${index}`}
+                      className="rounded-md border border-zinc-200 p-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                        <Badge variant="outline" className="break-all">
+                          {finding.path}:{finding.line}
+                        </Badge>
+                        <Badge variant="secondary">{finding.severity || "unknown"}</Badge>
+                        <span>{finding.side}</span>
+                      </div>
+                      <p className="mt-1.5 break-words">{finding.body}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="rounded-md border border-dashed border-zinc-300 p-3 text-zinc-600">
+                  No inline findings were returned for this review.
+                </p>
+              )}
+            </section>
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return { label: "Unknown time" };
+  return { label: date.toLocaleString(), dateTime: date.toISOString() };
+}
+
+function formatFindingCount(count: number) {
+  return `${count} ${count === 1 ? "finding" : "findings"}`;
+}
