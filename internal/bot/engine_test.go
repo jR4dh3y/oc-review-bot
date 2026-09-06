@@ -500,6 +500,111 @@ func TestPublishPreparedFencesGitHubWriteAfterReviewLeaseLoss(t *testing.T) {
 	}
 }
 
+func TestPublishPreparedPostsSummaryBeforeFindings(t *testing.T) {
+	var calls []string
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 7,
+				"head":   map[string]string{"sha": "head-sha", "ref": "feature"},
+				"base": map[string]any{
+					"sha":  "base-sha",
+					"repo": map[string]any{"id": 7, "full_name": "o/r"},
+				},
+			})
+		case r.Method == http.MethodGet &&
+			(r.URL.Path == "/repos/o/r/issues/7/comments" || r.URL.Path == "/repos/o/r/pulls/7/comments"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			calls = append(calls, "summary")
+			_ = json.NewEncoder(w).Encode(map[string]int64{"id": 101})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/comments":
+			calls = append(calls, "inline")
+			_ = json.NewEncoder(w).Encode(map[string]int64{"id": 202})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+	app := newBotTestApp(t, github.URL)
+	st := testStoreForEngine(t)
+	review := &store.Review{
+		RepoFull:          "o/r",
+		RepositoryID:      7,
+		PRNumber:          7,
+		InstallationID:    1,
+		RequesterGitHubID: 42,
+		RequesterLogin:    "alice",
+		TriggerCommentID:  99,
+	}
+	if err := st.CreateReview(review); err != nil {
+		t.Fatal(err)
+	}
+	lease := testEngineLease(t, st, "summary-before-findings")
+	claimed, ok, err := st.ClaimReviewByID(review.ID, lease.OwnerToken, lease.Fence)
+	if err != nil || !ok {
+		t.Fatalf("claim review = %+v, %v, %v", claimed, ok, err)
+	}
+	pr := &gh.PR{Number: 7}
+	pr.Head.SHA = "head-sha"
+	pr.Head.Ref = "feature"
+	pr.Base.SHA = "base-sha"
+	pr.Base.Repo.ID = 7
+	pr.Base.Repo.FullName = "o/r"
+	if err := st.SetReviewRevision(review.ID, claimed.ExecutionGeneration, "o/r", pr.Head.SHA, pr.RevisionToken(), lease.OwnerToken, lease.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PrepareReviewPublication(review.ID, claimed.ExecutionGeneration, store.PublicationPlan{
+		SummaryMD:     "The change is reviewed.",
+		SummaryBodyMD: "## Review\n\n### Sequence diagram\n\n```mermaid\nsequenceDiagram\n    Author->>Bot: Review\n```",
+		CommitSHA:     "head-sha",
+		Findings: []store.PublicationFinding{{
+			Path:          "main.go",
+			Line:          1,
+			Side:          "RIGHT",
+			Severity:      "warning",
+			FindingBodyMD: "SQL injection risk",
+			CommentBodyMD: "🟠 **warning**\n\nSQL injection risk",
+		}},
+	}, lease.OwnerToken, lease.Fence); err != nil {
+		t.Fatal(err)
+	}
+	running, err := st.Review(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(&config.Config{}, st, app, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine.startMu.Lock()
+	engine.started = true
+	engine.ready = true
+	engine.leaseOwner = lease.OwnerToken
+	engine.leaseFence = lease.Fence
+	engine.startMu.Unlock()
+	defer st.ReleaseServiceLease(lease.OwnerToken, lease.Fence)
+
+	if err := engine.publishPrepared(context.Background(), "installation-token", running); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "summary,inline" {
+		t.Fatalf("comment order = %q, want summary,inline", got)
+	}
+	stored, err := st.Review(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != store.StatusDone || stored.SummaryCommentID != 101 {
+		t.Fatalf("stored review = %+v", stored)
+	}
+	findings, err := st.ListFindings(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].PostedCommentID != 202 {
+		t.Fatalf("stored findings = %+v", findings)
+	}
+}
+
 func testStoreForEngine(t *testing.T) *store.Store {
 	t.Helper()
 	cipher, err := seal.New("engine-store-test")

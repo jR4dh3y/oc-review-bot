@@ -408,9 +408,9 @@ func TestReviewLifecyclePersistsDurablePublication(t *testing.T) {
 	if err != nil || len(publications) != 2 {
 		t.Fatalf("publications = %+v, %v", publications, err)
 	}
-	inline, summary := publications[0], publications[1]
-	if inline.Kind != PublicationInline || inline.Status != PublicationPending || inline.FindingID < 1 ||
-		summary.Kind != PublicationSummary || summary.Status != PublicationPending || summary.FindingID != 0 {
+	summary, inline := publications[0], publications[1]
+	if summary.Kind != PublicationSummary || summary.Status != PublicationPending || summary.FindingID != 0 ||
+		inline.Kind != PublicationInline || inline.Status != PublicationPending || inline.FindingID < 1 {
 		t.Fatalf("unexpected publications: %+v", publications)
 	}
 	if !strings.Contains(inline.BodyMD, inline.Marker) || !strings.Contains(summary.BodyMD, summary.Marker) {
@@ -419,19 +419,19 @@ func TestReviewLifecyclePersistsDurablePublication(t *testing.T) {
 	if err := s.FinishReviewDone(r.ID, claimed.ExecutionGeneration, owner, lease.Fence); !errors.Is(err, ErrReviewNotReady) {
 		t.Fatalf("unfinished publication completed: %v", err)
 	}
-	if ok, err := s.ClaimPublicationForSend(r.ID, claimed.ExecutionGeneration, inline.ID, owner, lease.Fence); err != nil || !ok {
-		t.Fatalf("claim inline publication = %v, %v", ok, err)
-	}
-	if ok, err := s.ClaimPublicationForSend(r.ID, claimed.ExecutionGeneration, inline.ID, owner, lease.Fence); err != nil || ok {
-		t.Fatalf("duplicate inline publication claim during handoff = %v, %v", ok, err)
-	}
-	if err := s.MarkPublicationPosted(r.ID, claimed.ExecutionGeneration, inline.ID, 444, owner, lease.Fence); err != nil {
-		t.Fatal(err)
-	}
 	if ok, err := s.ClaimPublicationForSend(r.ID, claimed.ExecutionGeneration, summary.ID, owner, lease.Fence); err != nil || !ok {
 		t.Fatalf("claim summary publication = %v, %v", ok, err)
 	}
+	if ok, err := s.ClaimPublicationForSend(r.ID, claimed.ExecutionGeneration, summary.ID, owner, lease.Fence); err != nil || ok {
+		t.Fatalf("duplicate summary publication claim during handoff = %v, %v", ok, err)
+	}
 	if err := s.MarkPublicationPosted(r.ID, claimed.ExecutionGeneration, summary.ID, 555, owner, lease.Fence); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ClaimPublicationForSend(r.ID, claimed.ExecutionGeneration, inline.ID, owner, lease.Fence); err != nil || !ok {
+		t.Fatalf("claim inline publication = %v, %v", ok, err)
+	}
+	if err := s.MarkPublicationPosted(r.ID, claimed.ExecutionGeneration, inline.ID, 444, owner, lease.Fence); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MarkPublicationPosted(r.ID, claimed.ExecutionGeneration, summary.ID, 999, owner, lease.Fence); err != nil {

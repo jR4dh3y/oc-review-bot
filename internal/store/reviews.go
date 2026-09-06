@@ -768,12 +768,12 @@ func withMarker(body, marker string) string {
 }
 
 // ListReviewPublications returns the exact persisted GitHub effects in posting
-// order. Inline comments go first so the summary acts as the completion signal.
+// order. The summary leads so reviewers get context before inline findings.
 func (s *Store) ListReviewPublications(reviewID int64) ([]Publication, error) {
 	rows, err := s.db.Query(`SELECT id, review_id, kind, ordinal, marker, body_md, commit_sha, path, side, line,
 			COALESCE(finding_id, 0), status, posted_comment_id, service_lease_owner, service_lease_fence, send_started_at
 		FROM review_publications WHERE review_id = ?
-		ORDER BY CASE kind WHEN 'inline' THEN 0 ELSE 1 END, ordinal`, reviewID)
+		ORDER BY CASE kind WHEN 'summary' THEN 0 ELSE 1 END, ordinal`, reviewID)
 	if err != nil {
 		return nil, err
 	}
