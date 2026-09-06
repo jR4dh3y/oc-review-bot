@@ -3,16 +3,18 @@
 package server
 
 import (
-	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,17 +42,17 @@ func New(cfg *config.Config, st *store.Store, app *gh.App, eng *bot.Engine, log 
 	mux.HandleFunc("POST /webhooks/github", s.handleWebhook)
 	mux.HandleFunc("GET /auth/github/login", s.handleOAuthLogin)
 	mux.HandleFunc("GET /auth/github/callback", s.handleOAuthCallback)
-	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	mux.HandleFunc("POST /auth/logout", s.withTrustedOrigin(s.handleLogout))
 
 	mux.HandleFunc("GET /api/me", s.withUser(s.handleMe))
 	mux.HandleFunc("GET /api/reviews", s.withUser(s.handleReviews))
 	mux.HandleFunc("GET /api/reviews/{id}", s.withUser(s.handleReviewDetail))
 	mux.HandleFunc("GET /api/admin/keys", s.withAdmin(s.handleListKeys))
-	mux.HandleFunc("POST /api/admin/keys", s.withAdmin(s.handleAddKey))
-	mux.HandleFunc("PATCH /api/admin/keys/{id}", s.withAdmin(s.handleKeyPatch))
-	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdmin(s.handleDeleteKey))
+	mux.HandleFunc("POST /api/admin/keys", s.withAdminMutation(s.handleAddKey))
+	mux.HandleFunc("PATCH /api/admin/keys/{id}", s.withAdminMutation(s.handleKeyPatch))
+	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdminMutation(s.handleDeleteKey))
 	mux.HandleFunc("GET /api/admin/settings", s.withAdmin(s.handleGetSettings))
-	mux.HandleFunc("POST /api/admin/settings", s.withAdmin(s.handleSetSettings))
+	mux.HandleFunc("POST /api/admin/settings", s.withAdminMutation(s.handleSetSettings))
 
 	mux.Handle("GET /", spaHandler(spa))
 	return withLogging(log, mux)
@@ -65,13 +67,19 @@ func withLogging(log *slog.Logger, next http.Handler) http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.st == nil || s.engine == nil || !s.engine.Ready() || s.st.Ping(r.Context()) != nil {
+		writeErr(w, http.StatusServiceUnavailable, "service unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
@@ -146,37 +154,66 @@ func (s *byteSeeker) Seek(offset int64, whence int) (int64, error) {
 
 // sessionCookie helpers.
 
-const sessionCookie = "oc_review_session"
+const (
+	sessionCookie     = "oc_review_session"
+	hostSessionCookie = "__Host-oc_review_session"
+	oauthStateCookie  = "oc_oauth_state"
+	hostOAuthCookie   = "__Host-oc_oauth_state"
+)
+
+var (
+	errDuplicateAuthCookie       = errors.New("duplicate authentication cookie")
+	errAuthenticationUnavailable = errors.New("authentication dependencies unavailable")
+)
+
+const requestBodyTimeout = 15 * time.Second
+
+func setRequestBodyDeadline(w http.ResponseWriter) {
+	// The production net/http server also enforces ReadTimeout; this shorter
+	// deadline covers handlers exercised behind a compatible ResponseWriter.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(requestBodyTimeout))
+}
 
 func (s *Server) setSession(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
+		Name:     s.sessionCookieName(),
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   strings.HasPrefix(s.cfg.PublicURL, "https://"),
+		Secure:   s.secureCookies(),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
 	})
 }
 
-func (s *Server) currentUser(r *http.Request) (*store.User, bool) {
-	c, err := r.Cookie(sessionCookie)
-	if err != nil || c.Value == "" {
-		return nil, false
+func (s *Server) currentUser(r *http.Request) (*store.User, error) {
+	c, err := uniqueRequestCookie(r, s.sessionCookieName())
+	if err != nil || c == nil || c.Value == "" {
+		return nil, store.ErrNotFound
+	}
+	if s.st == nil || s.cfg == nil {
+		return nil, errAuthenticationUnavailable
 	}
 	u, err := s.st.SessionUser(c.Value)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	return u, true
+	// Database flags are only cached display data. Configuration is the current
+	// immutable source of truth, so removed admins lose access immediately.
+	u.IsAdmin = s.cfg.IsAdminGitHubID(u.GitHubID)
+	return u, nil
 }
 
 func (s *Server) withUser(next func(*store.User, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		u, ok := s.currentUser(r)
-		if !ok {
+		u, err := s.currentUser(r)
+		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		if err != nil {
+			s.log.Error("load current user", "err", err)
+			writeErr(w, http.StatusServiceUnavailable, "authentication unavailable")
 			return
 		}
 		next(u, w, r)
@@ -185,7 +222,7 @@ func (s *Server) withUser(next func(*store.User, http.ResponseWriter, *http.Requ
 
 func (s *Server) withAdmin(next func(*store.User, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return s.withUser(func(u *store.User, w http.ResponseWriter, r *http.Request) {
-		if !u.IsAdmin {
+		if !s.cfg.IsAdminGitHubID(u.GitHubID) {
 			writeErr(w, http.StatusForbidden, "admin required")
 			return
 		}
@@ -193,10 +230,101 @@ func (s *Server) withAdmin(next func(*store.User, http.ResponseWriter, *http.Req
 	})
 }
 
-func randomHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+// withAdminMutation protects cookie-authenticated JSON mutations from
+// cross-origin and simple-form requests. GitHub webhooks and OAuth are not
+// browser session mutations and intentionally do not use this middleware.
+func (s *Server) withAdminMutation(next func(*store.User, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+	return s.withAdmin(func(u *store.User, w http.ResponseWriter, r *http.Request) {
+		setRequestBodyDeadline(w)
+		if !s.hasTrustedOrigin(r) {
+			writeErr(w, http.StatusForbidden, "invalid request origin")
+			return
+		}
+		if !isJSONContentType(r) {
+			writeErr(w, http.StatusUnsupportedMediaType, "application/json content type required")
+			return
+		}
+		next(u, w, r)
+	})
 }
 
-var _ = context.Background
+func (s *Server) withTrustedOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.hasTrustedOrigin(r) {
+			writeErr(w, http.StatusForbidden, "invalid request origin")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) hasTrustedOrigin(r *http.Request) bool {
+	if s.cfg == nil {
+		return false
+	}
+	origin, err := url.Parse(strings.TrimSpace(r.Header.Get("Origin")))
+	if err != nil || origin.Scheme == "" || origin.Host == "" || origin.User != nil ||
+		origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
+		return false
+	}
+	publicURL, err := url.Parse(s.cfg.PublicURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(origin.Scheme, publicURL.Scheme) && strings.EqualFold(origin.Host, publicURL.Host)
+}
+
+func isJSONContentType(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && strings.EqualFold(mediaType, "application/json")
+}
+
+func (s *Server) secureCookies() bool {
+	if s.cfg == nil {
+		return false
+	}
+	if s.cfg.CookieSecure {
+		return true
+	}
+	publicURL, err := url.Parse(s.cfg.PublicURL)
+	return err == nil && strings.EqualFold(publicURL.Scheme, "https")
+}
+
+func (s *Server) sessionCookieName() string {
+	if s.secureCookies() {
+		return hostSessionCookie
+	}
+	return sessionCookie
+}
+
+func (s *Server) oauthStateCookieName() string {
+	if s.secureCookies() {
+		return hostOAuthCookie
+	}
+	return oauthStateCookie
+}
+
+// uniqueRequestCookie rejects cookie tossing and malformed duplicate headers
+// instead of silently trusting net/http's first matching cookie.
+func uniqueRequestCookie(r *http.Request, name string) (*http.Cookie, error) {
+	var found *http.Cookie
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != name {
+			continue
+		}
+		if found != nil {
+			return nil, errDuplicateAuthCookie
+		}
+		clone := *cookie
+		found = &clone
+	}
+	return found, nil
+}
+
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}

@@ -1,5 +1,5 @@
-// Package pool hands out OpenCode Zen API keys, spreading usage across the
-// pool so no single key hits its daily limit.
+// Package pool hands out OpenCode Zen API keys, balancing configured request
+// load while cooling keys after provider quota or rate-limit failures.
 package pool
 
 import (
@@ -12,6 +12,8 @@ import (
 // ErrEmpty is returned when no usable key exists.
 var ErrEmpty = errors.New("no usable Zen API keys in the pool")
 
+const defaultCooldown = time.Hour
+
 // Pool rotates across the enabled, non-cooling-down keys.
 type Pool struct {
 	st *store.Store
@@ -21,35 +23,21 @@ type Pool struct {
 
 func New(st *store.Store, cooldown time.Duration) *Pool {
 	if cooldown <= 0 {
-		cooldown = timeUntilUTCMidnight()
+		cooldown = defaultCooldown
 	}
 	return &Pool{st: st, CooldownOnExhausted: cooldown}
 }
 
 // Acquire picks the key with the fewest requests today and records one use.
 func (p *Pool) Acquire() (*store.ZenKey, error) {
-	cands, err := p.st.PoolCandidates()
-	if err != nil {
-		return nil, err
-	}
-	if len(cands) == 0 {
+	k, err := p.st.AcquireKey()
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, ErrEmpty
 	}
-	k := &cands[0]
-	if err := p.st.RecordUsage(k.ID); err != nil {
-		return nil, err
-	}
-	return k, nil
+	return k, err
 }
 
 // Exhausted puts a key on cooldown after a quota/rate-limit failure.
 func (p *Pool) Exhausted(keyID int64) error {
 	return p.st.CoolKey(keyID, time.Now().UTC().Add(p.CooldownOnExhausted))
-}
-
-// timeUntilUTCMidnight matches the free-tier daily reset.
-func timeUntilUTCMidnight() time.Duration {
-	now := time.Now().UTC()
-	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
-	return midnight.Sub(now)
 }

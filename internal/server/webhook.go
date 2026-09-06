@@ -1,8 +1,8 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +10,8 @@ import (
 
 	"github.com/jR4dh3y/oc-review-bot/internal/store"
 )
+
+const maxWebhookBytes = 2 << 20
 
 // GitHub webhook event payloads (only the fields we use).
 
@@ -27,6 +29,7 @@ type issueCommentEvent struct {
 	} `json:"issue"`
 	Repo struct {
 		FullName string `json:"full_name"`
+		ID       int64  `json:"id"`
 	} `json:"repository"`
 	Installation struct {
 		ID int64 `json:"id"`
@@ -34,6 +37,7 @@ type issueCommentEvent struct {
 	Sender struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
+		ID    int64  `json:"id"`
 	} `json:"sender"`
 }
 
@@ -43,8 +47,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	payload, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-	if err != nil {
+	setRequestBodyDeadline(w)
+	r.Body = http.MaxBytesReader(w, r.Body, maxWebhookBytes)
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBytes+1))
+	if err != nil || len(payload) > maxWebhookBytes {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
@@ -73,24 +79,39 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ignored action")
 		return
 	}
-	s.handleIssueComment(r.Context(), w, &ev)
+	s.handleIssueComment(w, &ev, strings.TrimSpace(r.Header.Get("X-GitHub-Delivery")))
 }
 
 // handleIssueComment processes a mention of the bot on a PR.
-func (s *Server) handleIssueComment(ctx context.Context, w http.ResponseWriter, ev *issueCommentEvent) {
+func (s *Server) handleIssueComment(w http.ResponseWriter, ev *issueCommentEvent, deliveryID string) {
 	if ev.Issue.PullRequest == nil || ev.Issue.Number == 0 {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "not a pull request")
 		return
 	}
-	if ev.Sender.Type == "Bot" {
+	if !validIssueCommentIdentity(ev) {
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+	// Do not retain deliveries or send access nudges for installations and
+	// repositories outside the operator-owned review boundary.
+	if !s.cfg.AllowsReviewTarget(ev.Installation.ID, ev.Repo.ID) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ignoring bot comment")
+		fmt.Fprintln(w, "ignored target")
+		return
+	}
+	if !strings.EqualFold(ev.Sender.Type, "User") {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ignoring non-human comment")
 		return
 	}
 	if !mentionsBot(ev.Comment.Body, s.cfg.BotUsername) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "no mention")
+		return
+	}
+	if deliveryID == "" {
+		http.Error(w, "missing delivery", http.StatusBadRequest)
 		return
 	}
 
@@ -99,77 +120,148 @@ func (s *Server) handleIssueComment(ctx context.Context, w http.ResponseWriter, 
 	pr := ev.Issue.Number
 
 	// Registration gate: only registered website users get reviews.
-	if _, err := s.st.UserByLogin(login); err != nil {
-		s.nudgeRegister(ctx, ev, login, repo, pr)
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "registration required")
+	if _, err := s.st.UserByGitHubID(ev.Sender.ID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.Error("load webhook user", "github_id", ev.Sender.ID, "err", err)
+			http.Error(w, "db failed", http.StatusInternalServerError)
+			return
+		}
+		s.queueNudge(w, ev, deliveryID, store.NudgeRegistration)
+		return
+	}
+	if !s.cfg.CanRequestReview(ev.Sender.ID, ev.Installation.ID, ev.Repo.ID) {
+		s.queueNudge(w, ev, deliveryID, store.NudgeEntitlement)
 		return
 	}
 
-	// Dedupe: one active review per PR.
-	if active, err := s.st.ActiveReview(repo, pr); err == nil {
-		s.log.Info("review already active, skipping", "review", active.ID, "repo", repo, "pr", pr)
+	rev := &store.Review{
+		RepoFull:          repo,
+		RepositoryID:      ev.Repo.ID,
+		PRNumber:          pr,
+		InstallationID:    ev.Installation.ID,
+		RequesterGitHubID: ev.Sender.ID,
+		RequesterLogin:    login,
+		TriggerCommentID:  ev.Comment.ID,
+	}
+	result, err := s.st.CreateReviewWithAdmission(rev, deliveryID, store.ReviewAdmission{
+		UserPerHour: s.cfg.UserReviewsPerHour,
+		RepoPerHour: s.cfg.RepoReviewsPerHour,
+		MaxActive:   s.cfg.MaxActiveReviews,
+	})
+	if err != nil {
+		s.log.Error("create review", "err", err)
+		http.Error(w, "db failed", http.StatusInternalServerError)
+		return
+	}
+	if result.DuplicateDelivery {
+		s.log.Info("duplicate webhook delivery, skipping", "delivery", deliveryID)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "duplicate delivery")
+		return
+	}
+	if !result.Created {
+		if result.RateLimited || result.QueueFull {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "review capacity unavailable")
+			return
+		}
+		s.log.Info("review already active, skipping", "repo", repo, "pr", pr)
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "review already active")
 		return
 	}
 
-	token, err := s.app.InstallationToken(ctx, ev.Installation.ID)
-	if err != nil {
-		s.log.Error("installation token", "err", err)
-		http.Error(w, "github auth failed", http.StatusBadGateway)
-		return
-	}
-	prInfo, err := s.app.GetPR(ctx, token, repo, pr)
-	if err != nil {
-		s.log.Error("get PR", "err", err)
-		http.Error(w, "github api failed", http.StatusBadGateway)
-		return
-	}
-
-	rev := &store.Review{
-		RepoFull:         repo,
-		PRNumber:         pr,
-		HeadSHA:          prInfo.Head.SHA,
-		InstallationID:   ev.Installation.ID,
-		RequesterLogin:   login,
-		TriggerCommentID: ev.Comment.ID,
-	}
-	if err := s.st.CreateReview(rev); err != nil {
-		s.log.Error("create review", "err", err)
-		http.Error(w, "db failed", http.StatusInternalServerError)
-		return
-	}
-
-	s.engine.Trigger(ctx, ev.Installation.ID, repo, ev.Comment.ID)
 	s.engine.Enqueue(rev.ID)
 	s.log.Info("review enqueued", "review", rev.ID, "repo", repo, "pr", pr, "by", login)
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintln(w, "review enqueued")
 }
 
-// nudgeRegister tells an unregistered commenter to register, once per PR.
-func (s *Server) nudgeRegister(ctx context.Context, ev *issueCommentEvent, login, repo string, pr int64) {
-	posted, err := s.st.NudgePosted(repo, pr, login)
-	if err != nil || posted {
-		return
+func (s *Server) queueNudge(w http.ResponseWriter, ev *issueCommentEvent, deliveryID, kind string) {
+	nudge := &store.Nudge{
+		RepoFull:          ev.Repo.FullName,
+		RepositoryID:      ev.Repo.ID,
+		PRNumber:          ev.Issue.Number,
+		InstallationID:    ev.Installation.ID,
+		RequesterGitHubID: ev.Sender.ID,
+		RequesterLogin:    strings.ToLower(ev.Sender.Login),
+		Kind:              kind,
 	}
-	token, err := s.app.InstallationToken(ctx, ev.Installation.ID)
+	result, err := s.st.CreateNudgeOnce(nudge, deliveryID)
 	if err != nil {
-		s.log.Error("nudge token", "err", err)
+		s.log.Error("create access nudge", "err", err)
+		http.Error(w, "db failed", http.StatusInternalServerError)
 		return
 	}
-	body := fmt.Sprintf("👋 Hi @%s — reviews are only available to registered users.\n\n"+
-		"Please register at %s, then mention `@%s` again and I'll review this PR.",
-		login, s.cfg.PublicURL, s.cfg.BotUsername)
-	if _, err := s.app.CreateIssueComment(ctx, token, repo, pr, body); err != nil {
-		s.log.Error("nudge comment", "err", err)
+	if result.DuplicateDelivery {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "duplicate delivery")
 		return
 	}
-	s.st.MarkNudge(repo, pr, login)
+	if result.Created {
+		s.engine.EnqueueNudge(nudge.ID)
+	}
+	w.WriteHeader(http.StatusOK)
+	if kind == store.NudgeRegistration {
+		fmt.Fprintln(w, "registration required")
+		return
+	}
+	fmt.Fprintln(w, "review access required")
 }
 
 // mentionsBot reports whether body mentions @BotUsername (case-insensitive).
 func mentionsBot(body, username string) bool {
-	return strings.Contains(strings.ToLower(body), "@"+strings.ToLower(username))
+	body = strings.ToLower(body)
+	target := "@" + strings.ToLower(username)
+	for offset := 0; ; {
+		match := strings.Index(body[offset:], target)
+		if match < 0 {
+			return false
+		}
+		start := offset + match
+		end := start + len(target)
+		beforeOK := start == 0 || !isGitHubLoginByte(body[start-1])
+		afterOK := end == len(body) || !isGitHubLoginByte(body[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = end
+	}
+}
+
+func validIssueCommentIdentity(ev *issueCommentEvent) bool {
+	return ev != nil && ev.Comment.ID > 0 && ev.Issue.Number > 0 && ev.Repo.ID > 0 && ev.Installation.ID > 0 &&
+		ev.Sender.ID > 0 && validGitHubLogin(ev.Sender.Login) && validRepoFullName(ev.Repo.FullName)
+}
+
+func validGitHubLogin(login string) bool {
+	if len(login) == 0 || len(login) > 39 || login[0] == '-' || login[len(login)-1] == '-' {
+		return false
+	}
+	for i := range login {
+		if !isGitHubLoginByte(login[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRepoFullName(repo string) bool {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || len(parts[0]) == 0 || len(parts[0]) > 39 || len(parts[1]) == 0 || len(parts[1]) > 100 {
+		return false
+	}
+	for _, part := range parts {
+		for i := range part {
+			c := part[i]
+			if !(isGitHubLoginByte(c) || c == '.' || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isGitHubLoginByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
 }

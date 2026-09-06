@@ -22,10 +22,11 @@ type fileLines struct {
 func NewDiffIndex(files []gh.File) *DiffIndex {
 	idx := &DiffIndex{files: map[string]*fileLines{}}
 	for _, f := range files {
-		if f.Patch == "" {
+		filename, ok := normalizePath(f.Filename)
+		if !ok || f.Patch == "" {
 			continue
 		}
-		fl := idx.file(f.Filename)
+		fl := idx.file(filename)
 		parsePatch(f.Patch, fl)
 	}
 	return idx
@@ -43,6 +44,17 @@ func (d *DiffIndex) file(path string) *fileLines {
 // InDiff reports whether a line of path is part of the diff on the given
 // side ("RIGHT" for new lines, "LEFT" for old lines).
 func (d *DiffIndex) InDiff(path, side string, line int64) bool {
+	if line < 1 {
+		return false
+	}
+	path, ok := normalizePath(path)
+	if !ok {
+		return false
+	}
+	side, ok = normalizeSide(side)
+	if !ok {
+		return false
+	}
 	fl, ok := d.files[path]
 	if !ok {
 		return false

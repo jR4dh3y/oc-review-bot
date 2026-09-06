@@ -2,11 +2,31 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
+	"github.com/jR4dh3y/oc-review-bot/internal/config"
 	"github.com/jR4dh3y/oc-review-bot/internal/store"
 )
+
+const maxAPIJSONBytes = 64 << 10
+
+// decodeJSONBody accepts exactly one bounded JSON object after the route's
+// middleware has verified its content type and origin.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAPIJSONBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("request must contain one JSON value")
+	}
+	return nil
+}
 
 // handleMe returns the current user.
 func (s *Server) handleMe(u *store.User, w http.ResponseWriter, r *http.Request) {
@@ -41,14 +61,31 @@ func toReviewJSON(r store.Review, findings int) reviewJSON {
 
 // handleReviews lists recent reviews with finding counts.
 func (s *Server) handleReviews(u *store.User, w http.ResponseWriter, r *http.Request) {
-	reviews, err := s.st.ListReviews(50)
+	var (
+		reviews []store.Review
+		err     error
+	)
+	if u.IsAdmin {
+		reviews, err = s.st.ListReviewsForTargets(s.cfg.InstallationIDs, s.cfg.RepositoryIDs, 50)
+	} else {
+		reviews, err = s.st.ListReviewsForRequesterGitHubIDAndTargets(
+			u.GitHubID, s.cfg.InstallationIDs, s.cfg.RepositoryIDs, 50,
+		)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "db failed")
 		return
 	}
 	out := make([]reviewJSON, 0, len(reviews))
 	for _, rev := range reviews {
-		findings, _ := s.st.ListFindings(rev.ID)
+		if !s.canViewReview(u, rev) {
+			continue
+		}
+		findings, err := s.st.ListFindings(rev.ID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "db failed")
+			return
+		}
 		out = append(out, toReviewJSON(rev, len(findings)))
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -63,6 +100,15 @@ func (s *Server) handleReviewDetail(u *store.User, w http.ResponseWriter, r *htt
 	}
 	rev, err := s.st.Review(id)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "review not found")
+		} else {
+			writeErr(w, http.StatusInternalServerError, "db failed")
+		}
+		return
+	}
+	if !s.canViewReview(u, *rev) {
+		// Return the same response as a missing review to avoid exposing IDs.
 		writeErr(w, http.StatusNotFound, "review not found")
 		return
 	}
@@ -75,6 +121,18 @@ func (s *Server) handleReviewDetail(u *store.User, w http.ResponseWriter, r *htt
 		"review":   toReviewJSON(*rev, len(findings)),
 		"findings": findings,
 	})
+}
+
+// Historical review data is retained for auditability but is visible only
+// while the requester still has the current immutable review entitlement.
+func (s *Server) canViewReview(u *store.User, rev store.Review) bool {
+	if u == nil || !s.cfg.AllowsReviewTarget(rev.InstallationID, rev.RepositoryID) {
+		return false
+	}
+	if u.IsAdmin {
+		return true
+	}
+	return rev.RequesterGitHubID == u.GitHubID && s.cfg.CanRequestReview(u.GitHubID, rev.InstallationID, rev.RepositoryID)
 }
 
 // handleListKeys lists masked Zen keys.
@@ -96,7 +154,7 @@ func (s *Server) handleAddKey(u *store.User, w http.ResponseWriter, r *http.Requ
 		Label  string `json:"label"`
 		Secret string `json:"secret"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Secret == "" {
+	if err := decodeJSONBody(w, r, &body); err != nil || body.Secret == "" {
 		writeErr(w, http.StatusBadRequest, "label and secret required")
 		return
 	}
@@ -124,7 +182,7 @@ func (s *Server) handleKeyPatch(u *store.User, w http.ResponseWriter, r *http.Re
 	var body struct {
 		Disabled *bool `json:"disabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Disabled == nil {
+	if err := decodeJSONBody(w, r, &body); err != nil || body.Disabled == nil {
 		writeErr(w, http.StatusBadRequest, "disabled required")
 		return
 	}
@@ -140,6 +198,11 @@ func (s *Server) handleDeleteKey(u *store.User, w http.ResponseWriter, r *http.R
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var body struct{}
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "empty JSON object required")
 		return
 	}
 	if err := s.st.DeleteKey(id); err != nil {
@@ -161,7 +224,7 @@ func (s *Server) handleSetSettings(u *store.User, w http.ResponseWriter, r *http
 	var body struct {
 		Model string `json:"model"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model == "" {
+	if err := decodeJSONBody(w, r, &body); err != nil || !config.ValidModel(body.Model) {
 		writeErr(w, http.StatusBadRequest, "model required")
 		return
 	}

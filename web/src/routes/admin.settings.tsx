@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { createRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Route as RootRoute } from "./__root";
-import { api } from "@/lib/api";
+import { RequireUser } from "@/components/auth-gate";
+import { LoadingState, RequestError } from "@/components/query-state";
+import { api, getErrorMessage } from "@/lib/api";
+import { userQueryKey, useCurrentUser, useUnauthorizedRedirect } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,54 +17,122 @@ export const Route = createRoute({
 });
 
 function AdminSettings() {
-  const qc = useQueryClient();
-  const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
-  const [model, setModel] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  return (
+    <RequireUser admin>
+      <SettingsForm />
+    </RequireUser>
+  );
+}
 
-  const save = useMutation({
+function SettingsForm() {
+  const queryClient = useQueryClient();
+  const currentUser = useCurrentUser();
+  const userID = currentUser.data?.id;
+  const settings = useQuery({
+    queryKey: userID == null ? ["settings", "anonymous"] : userQueryKey("settings", userID),
+    queryFn: api.settings,
+    enabled: userID != null,
+	});
+	const [model, setModel] = useState<string | null>(null);
+	const [saved, setSaved] = useState(false);
+
+	const save = useMutation({
     mutationFn: (next: string) => api.saveSettings(next),
-    onSuccess: () => {
+    onMutate: () => setSaved(false),
+    onSuccess: (_, next) => {
+      setModel(next);
       setSaved(true);
-      void qc.invalidateQueries({ queryKey: ["settings"] });
-    },
-  });
+      if (userID != null) {
+        void queryClient.invalidateQueries({ queryKey: userQueryKey("settings", userID) });
+      }
+		},
+	});
+	const sessionExpired = useUnauthorizedRedirect([settings.error, save.error]);
 
-  const current = model ?? settings.data?.model ?? "";
+	const current = model ?? settings.data?.model ?? "";
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const next = current.trim();
+    if (next) save.mutate(next);
+  };
 
   return (
-    <Card>
+    <Card aria-busy={settings.isFetching || save.isPending}>
       <CardHeader>
-        <CardTitle>Settings</CardTitle>
-        <CardDescription>Default model for new reviews (free tier default shown).</CardDescription>
+        <CardTitle as="h1">Review settings</CardTitle>
+        <CardDescription>
+          Set the OpenCode Zen model ID applied to new reviews. Model availability, pricing, and
+          account limits are managed by Zen.
+        </CardDescription>
       </CardHeader>
       <CardContent className="grid max-w-md gap-3">
-        {settings.isError ? (
-          <p className="text-sm text-red-600">Admin required to view settings.</p>
+        {settings.isPending ? (
+          <LoadingState>Loading review settings…</LoadingState>
+        ) : sessionExpired ? (
+          <LoadingState>Your session has ended. Returning you to sign in…</LoadingState>
+        ) : settings.isError ? (
+          <RequestError
+            title="Couldn’t load settings"
+            description={getErrorMessage(settings.error, "Try again in a moment.")}
+            onRetry={() => void settings.refetch()}
+          />
         ) : (
-          <>
-            <Input
-              placeholder="opencode/big-pickle"
-              value={current}
-              disabled={settings.isPending}
-              onChange={(e) => {
-                setModel(e.target.value);
-                setSaved(false);
-              }}
-            />
-            <div className="flex items-center gap-2">
-              <Button
-                disabled={!current.trim() || save.isPending}
-                onClick={() => save.mutate(current.trim())}
-              >
+          <form className="grid gap-3" onSubmit={submit}>
+            <div className="grid gap-1.5">
+              <label htmlFor="default-model" className="text-sm font-medium">
+                Default model
+              </label>
+              <Input
+                id="default-model"
+                name="model"
+                placeholder="Provider model ID"
+                value={current}
+                required
+                disabled={save.isPending}
+                aria-describedby="default-model-help"
+                onChange={(event) => {
+                  setModel(event.target.value);
+                  setSaved(false);
+                }}
+              />
+              <p id="default-model-help" className="text-xs text-zinc-500">
+                Use a model identifier available to your organization’s Zen account.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="submit" disabled={!current.trim() || save.isPending}>
                 {save.isPending ? "Saving…" : "Save"}
               </Button>
-              {saved && <span className="text-sm text-green-700">Saved.</span>}
-              {save.isError && (
-                <span className="text-sm text-red-600">{(save.error as Error).message}</span>
+              {save.isPending && (
+                <span className="text-sm text-zinc-500" role="status" aria-live="polite">
+                  Saving changes…
+                </span>
+              )}
+              {saved && !save.isPending && (
+                <span className="text-sm text-green-700" role="status">
+                  Saved.
+                </span>
               )}
             </div>
-          </>
+            {save.isError && (
+              <div
+                className="flex flex-wrap items-center gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+                role="alert"
+              >
+                <span>Couldn’t save settings: {getErrorMessage(save.error, "Try again.")}</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!current.trim() || save.isPending}
+                  onClick={() => save.mutate(current.trim())}
+                >
+                  Try again
+                </Button>
+              </div>
+            )}
+          </form>
         )}
       </CardContent>
     </Card>

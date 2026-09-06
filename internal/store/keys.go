@@ -78,6 +78,25 @@ func (s *Store) Key(id int64) (*ZenKey, error) {
 	return scanKey(s.db.QueryRow(`SELECT `+keyCols+` FROM zen_keys WHERE id = ?`, id), s.keyEnc)
 }
 
+// AcquireKey atomically selects the least-used eligible key and records its
+// use. Selection and increment must share one statement so concurrent workers
+// cannot all choose the same key before any usage is recorded.
+func (s *Store) AcquireKey() (*ZenKey, error) {
+	return scanKey(s.db.QueryRow(`
+UPDATE zen_keys
+SET requests_today = `+todayUTC+` + 1,
+    usage_date = strftime('%Y-%m-%d', 'now')
+WHERE id = (
+	SELECT id
+	FROM zen_keys
+	WHERE disabled_at = ''
+	  AND (cooldown_until = '' OR cooldown_until <= ?)
+	ORDER BY `+todayUTC+` ASC, id ASC
+	LIMIT 1
+)
+RETURNING `+keyCols, now()), s.keyEnc)
+}
+
 // ListKeys returns masked keys newest-first for the admin UI.
 func (s *Store) ListKeys() ([]MaskedZenKey, error) {
 	rows, err := s.db.Query(`SELECT ` + keyCols + ` FROM zen_keys ORDER BY id DESC`)
