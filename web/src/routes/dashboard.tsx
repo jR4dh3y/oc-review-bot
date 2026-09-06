@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { Route as RootRoute } from "./__root";
 import { RequireUser } from "@/components/auth-gate";
+import { BotMention } from "@/components/bot-mention";
 import { LoadingState, RequestError } from "@/components/query-state";
 import { api, getErrorMessage, isApiError, type ReviewStatus } from "@/lib/api";
 import { userQueryKey, userReviewQueryKey, useCurrentUser, useUnauthorizedRedirect } from "@/lib/auth";
@@ -110,8 +111,7 @@ function ReviewList() {
           <div className="rounded-md border border-dashed border-zinc-300 p-4 text-sm text-zinc-600">
             <p className="font-medium text-zinc-900">No review requests yet.</p>
             <p className="mt-1">
-              After registering, mention <code className="rounded bg-zinc-100 px-1">@oc-review-bot</code>{" "}
-              on a pull request in an installed repository.
+              After registering, mention <BotMention /> on a pull request in an installed repository.
             </p>
           </div>
         )}

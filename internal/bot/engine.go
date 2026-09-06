@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/jR4dh3y/oc-review-bot/internal/review"
 	"github.com/jR4dh3y/oc-review-bot/internal/runner"
 	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -1072,7 +1074,15 @@ func (e *Engine) handleReviewError(r *store.Review, log *slog.Logger, err error)
 		e.signal()
 		return
 	}
-	e.failReview(r, log, reviewFailureMessage)
+	// Terminal failures log only the error class: the underlying error can
+	// carry hostile repository content or provider secrets. The endpoint and
+	// status of GitHub HTTP failures are operator-owned request data.
+	attrs := []any{"cause", reviewErrorClass(err)}
+	var httpErr *gh.HTTPError
+	if errors.As(err, &httpErr) {
+		attrs = append(attrs, "github_status", httpErr.StatusCode, "github_endpoint", httpErr.Method+" "+httpErr.Path)
+	}
+	log.Warn("review failed", attrs...)
 }
 
 func isRetryableReviewError(err error) bool {
@@ -1085,14 +1095,38 @@ func reviewErrorClass(err error) string {
 	switch {
 	case errors.Is(err, runner.ErrQuota):
 		return "provider_quota"
+	case errors.Is(err, runner.ErrExecution):
+		return "opencode_execution"
+	case errors.Is(err, runner.ErrHeadChanged):
+		return "head_changed"
+	case errors.Is(err, runner.ErrOutputTooLarge):
+		return "output_too_large"
+	case errors.Is(err, runner.ErrSandboxUnavailable):
+		return "sandbox_unavailable"
 	case errors.Is(err, pool.ErrEmpty):
 		return "no_key_available"
+	case errors.Is(err, store.ErrReviewNotReady):
+		return "review_not_ready"
+	case errors.Is(err, errPublicationInFlight):
+		return "publication_in_flight"
 	case gh.IsRetryable(err):
 		return "github_transient"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	default:
-		return "retryable"
+		var httpErr *gh.HTTPError
+		if errors.As(err, &httpErr) {
+			return fmt.Sprintf("github_http_%d", httpErr.StatusCode)
+		}
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) {
+			return fmt.Sprintf("sqlite_%d", sqliteErr.Code())
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return "network_error"
+		}
+		return "unknown"
 	}
 }
 

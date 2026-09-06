@@ -4,6 +4,7 @@ import { Route as RootRoute } from "./__root";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useCurrentUser } from "@/lib/auth";
+import { BotMention } from "@/components/bot-mention";
 
 export const Route = createRoute({
   getParentRoute: () => RootRoute,
@@ -22,8 +23,7 @@ function Landing() {
             GitHub pull-request reviews with OpenCode Zen
           </CardTitle>
           <CardDescription>
-            Sign in once with GitHub, then mention{" "}
-            <code className="rounded bg-zinc-100 px-1">@oc-review-bot</code> on a pull request in
+            Sign in once with GitHub, then mention <BotMention /> on a pull request in
             an installed repository to receive a summary and inline findings.
           </CardDescription>
         </CardHeader>
@@ -57,7 +57,7 @@ function Landing() {
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-zinc-600">
-            Comment <code>@oc-review-bot</code> on a PR. Only GitHub accounts that have registered
+            Comment <BotMention /> on a PR. Only GitHub accounts that have registered
             through this site can request a review.
           </CardContent>
         </Card>

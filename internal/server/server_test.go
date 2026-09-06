@@ -203,6 +203,26 @@ func TestWebhookPing(t *testing.T) {
 	}
 }
 
+func TestMetaReturnsConfiguredBotUsernameWithoutSession(t *testing.T) {
+	s, _, _ := setup(t, nil)
+	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/meta", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		BotUsername string `json:"bot_username"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.BotUsername != s.cfg.BotUsername || body.BotUsername == "" {
+		t.Fatalf("bot_username = %q, want configured %q", body.BotUsername, s.cfg.BotUsername)
+	}
+}
+
 func TestHealthIsUnavailableBeforeWorkerStart(t *testing.T) {
 	s, _, _ := setup(t, nil)
 	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
