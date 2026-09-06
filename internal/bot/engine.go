@@ -31,6 +31,8 @@ const (
 	maxDeliveryAttempts = int64(5)
 	nudgeRequestTimeout = 30 * time.Second
 	serviceLeaseTTL     = 30 * time.Second
+	deliveryRetention   = 7 * 24 * time.Hour
+	deliveryPurgeEvery  = 6 * time.Hour
 )
 
 var (
@@ -73,6 +75,8 @@ type Engine struct {
 	wg           sync.WaitGroup
 	pollInterval time.Duration
 	leaseTTL     time.Duration
+
+	lastDeliveryPurge time.Time
 }
 
 func NewEngine(cfg *config.Config, st *store.Store, app *gh.App, p *pool.Pool, log *slog.Logger) *Engine {
@@ -135,6 +139,9 @@ func (e *Engine) Start(n int) error {
 	if _, err := e.st.RecoverInterruptedNudges(owner, lease.Fence); err != nil {
 		return releaseOnError(fmt.Errorf("recover interrupted access notifications: %w", err))
 	}
+	// Startup purge runs before the lease is handed to workers; retention is
+	// best-effort and must not fail startup.
+	e.purgeDeliveryMarkers()
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel = cancel
 	e.leaseOwner = owner
@@ -438,7 +445,22 @@ func (e *Engine) recoverExpiredWork() bool {
 		}
 		e.log.Error("recover interrupted access notifications", "err", err)
 	}
+	e.purgeDeliveryMarkers()
 	return e.serviceLeaseOwned()
+}
+
+// purgeDeliveryMarkers bounds the webhook replay table on a fixed cadence.
+// Retention is deliberately longer than GitHub's redelivery window so a
+// late redelivery is still recognized as a duplicate.
+func (e *Engine) purgeDeliveryMarkers() {
+	if time.Since(e.lastDeliveryPurge) < deliveryPurgeEvery {
+		return
+	}
+	if _, err := e.st.PurgeDeliveriesBefore(time.Now().Add(-deliveryRetention)); err != nil {
+		e.log.Error("purge webhook delivery markers", "err", err)
+		return
+	}
+	e.lastDeliveryPurge = time.Now()
 }
 
 func (e *Engine) claimAndProcess(ctx context.Context, preferNudge bool) bool {
@@ -546,7 +568,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	token, err := e.app.InstallationToken(ctx, r.InstallationID, r.RepositoryID)
@@ -554,7 +576,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		e.handleReviewError(r, log, err)
 		return
 	}
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	currentPR, err := e.app.GetPR(ctx, token, r.RepoFull, r.PRNumber)
@@ -575,7 +597,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	if r.PublicationPrepared {
 		if r.HeadRevision == "" || r.HeadRevision != currentRevision || !strings.EqualFold(currentPR.Head.SHA, r.HeadSHA) {
-			e.failHeadChanged(r, log)
+			e.handlePreparedHeadChanged(ctx, token, r, log)
 			return
 		}
 	} else if (r.HeadSHA != "" && !strings.EqualFold(currentPR.Head.SHA, r.HeadSHA)) ||
@@ -589,22 +611,35 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	r.HeadSHA = currentPR.Head.SHA
 	r.HeadRevision = currentRevision
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
 		e.handleReviewError(r, log, err)
 		return
 	}
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
+		if !errors.Is(err, store.ErrReviewLeaseLost) {
+			e.handleReviewError(r, log, err)
+		}
+		return
+	}
 	if err := e.app.ReactToIssueComment(ctx, token, r.RepoFull, r.TriggerCommentID, "eyes"); err != nil {
 		log.Warn("acknowledge review request", "cause", "github")
 	}
 	if r.PublicationPrepared {
-		if !strings.EqualFold(currentPR.Head.SHA, r.HeadSHA) {
-			e.failHeadChanged(r, log)
+		// Re-read immediately before resuming a prepared publication. The
+		// earlier revision check protects the common path; this one catches a
+		// force-push while the worker was acknowledging the request.
+		if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
+			if errors.Is(err, runner.ErrHeadChanged) {
+				e.handlePreparedHeadChanged(ctx, token, r, log)
+			} else {
+				e.handleReviewError(r, log, err)
+			}
 			return
 		}
-		if !e.mayProcess(ctx) {
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
 			return
 		}
 		if err := e.publishPrepared(ctx, token, r); err != nil {
@@ -615,7 +650,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
@@ -627,7 +662,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		e.handleReviewError(r, log, err)
 		return
 	}
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
@@ -653,6 +688,9 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 
 	// A force-push after the agent starts makes its output stale. Recheck the
 	// exact revision before persisting a publication plan or writing to GitHub.
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
+		return
+	}
 	currentPR, err = e.app.GetPR(ctx, token, r.RepoFull, r.PRNumber)
 	if err != nil {
 		e.handleReviewError(r, log, err)
@@ -669,14 +707,14 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if err := e.preparePublication(r, currentPR, review.NewDiffIndex(files), review.ExtractReview(agentOut)); err != nil {
 		e.handleReviewError(r, log, err)
 		return
 	}
-	if !e.mayProcess(ctx) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if err := e.publishPrepared(ctx, token, r); err != nil {
@@ -691,8 +729,8 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review, model string, diff []byte, log *slog.Logger) (*store.ZenKey, string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		if !e.mayProcess(ctx) {
-			return nil, "", store.ErrReviewLeaseLost
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
+			return nil, "", err
 		}
 		if !e.cfg.CanRequestReview(r.RequesterGitHubID, r.InstallationID, r.RepositoryID) {
 			return nil, "", errReviewAccess
@@ -711,8 +749,8 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 		if err := e.st.SetReviewExecution(r.ID, r.ExecutionGeneration, model, key.ID, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
 			return nil, "", fmt.Errorf("record review execution: %w", err)
 		}
-		if !e.mayProcess(ctx) {
-			return nil, "", store.ErrReviewLeaseLost
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
+			return nil, "", err
 		}
 		r.Model = model
 		out, runErr := e.run(ctx, runner.Options{
@@ -735,8 +773,8 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 		if !errors.Is(runErr, runner.ErrQuota) {
 			return key, "", runErr
 		}
-		if !e.mayProcess(ctx) {
-			return nil, "", store.ErrReviewLeaseLost
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
+			return nil, "", err
 		}
 		if err := e.pool.Exhausted(key.ID); err != nil {
 			return key, "", fmt.Errorf("cool exhausted key: %w", err)
@@ -825,12 +863,15 @@ func (e *Engine) publishPrepared(ctx context.Context, token string, r *store.Rev
 			return err
 		}
 
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
+			return err
+		}
 		commentID, found, err := e.findPublication(ctx, token, r, publication)
 		if err != nil {
 			return err
 		}
 		if !found {
-			if err := e.processError(ctx); err != nil {
+			if err := e.reviewSideEffectError(ctx, r); err != nil {
 				return err
 			}
 			if _, err := e.ensureCurrentHead(ctx, token, r, publication.CommitSHA); err != nil {
@@ -847,10 +888,13 @@ func (e *Engine) publishPrepared(ctx context.Context, token string, r *store.Rev
 			}
 		}
 		if !found {
+			if err := e.reviewSideEffectError(ctx, r); err != nil {
+				return err
+			}
 			if err := e.st.BeginPublicationSend(r.ID, r.ExecutionGeneration, publication.ID, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
 				return err
 			}
-			if err := e.processError(ctx); err != nil {
+			if err := e.reviewSideEffectError(ctx, r); err != nil {
 				return e.publicationUncertain(r, publication, err)
 			}
 			commentID, err = e.createPublication(ctx, token, r, publication)
@@ -873,12 +917,11 @@ func (e *Engine) publishPrepared(ctx context.Context, token string, r *store.Rev
 
 // reconcilePublication is marker-only. An absent marker remains an operator
 // decision point; creating a replacement comment would duplicate an unknown
-// remote effect.
+// remote effect. The PR head is deliberately not rechecked here: recording an
+// effect that already landed is safe on any revision, and refusing the lookup
+// on a force-push would orphan the uncertainty instead of resolving it.
 func (e *Engine) reconcilePublication(ctx context.Context, token string, r *store.Review, publication store.Publication) error {
-	if err := e.processError(ctx); err != nil {
-		return errors.Join(store.ErrPublicationReconcile, err)
-	}
-	if _, err := e.ensureCurrentHead(ctx, token, r, publication.CommitSHA); err != nil {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return errors.Join(store.ErrPublicationReconcile, err)
 	}
 	commentID, found, err := e.findPublication(ctx, token, r, publication)
@@ -887,6 +930,9 @@ func (e *Engine) reconcilePublication(ctx context.Context, token string, r *stor
 	}
 	if !found {
 		return store.ErrPublicationReconcile
+	}
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
+		return errors.Join(store.ErrPublicationReconcile, err)
 	}
 	if err := e.st.MarkPublicationPosted(r.ID, r.ExecutionGeneration, publication.ID, commentID, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
 		return errors.Join(store.ErrPublicationReconcile, err)
@@ -902,6 +948,9 @@ func (e *Engine) publicationUncertain(r *store.Review, publication store.Publica
 }
 
 func (e *Engine) ensureCurrentRevision(ctx context.Context, token string, r *store.Review) (*gh.PR, error) {
+	if err := e.reviewSideEffectError(ctx, r); err != nil {
+		return nil, err
+	}
 	pr, err := e.app.GetPR(ctx, token, r.RepoFull, r.PRNumber)
 	if err != nil {
 		return nil, err
@@ -964,7 +1013,7 @@ func (e *Engine) createPublication(ctx context.Context, token string, r *store.R
 }
 
 func (e *Engine) finishPublishedReview(ctx context.Context, token string, r *store.Review, log *slog.Logger) {
-	if !e.mayProcess(ctx) {
+	if err := e.reviewCompletionSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if err := e.app.ReactToIssueComment(ctx, token, r.RepoFull, r.TriggerCommentID, "rocket"); err != nil {
@@ -1047,6 +1096,92 @@ func reviewErrorClass(err error) string {
 func (e *Engine) failHeadChanged(r *store.Review, log *slog.Logger) {
 	log.Info("review skipped because pull request head changed")
 	e.failReview(r, log, headChangedMessage)
+}
+
+// uncertainDeliveryStatus reports whether a publication may already carry a
+// remote effect whose acknowledgement never became durable. Pending
+// publications were never POSTed, so discarding them is always safe.
+func uncertainDeliveryStatus(status string) bool {
+	return status == store.PublicationSending || status == store.PublicationReconciliationRequired
+}
+
+// handlePreparedHeadChanged reconciles effects from a prepared review before
+// releasing the active-review constraint. A force-push must not strand a
+// sending publication or let a replacement review race an unknown comment.
+func (e *Engine) handlePreparedHeadChanged(ctx context.Context, token string, r *store.Review, log *slog.Logger) {
+	if err := e.reconcilePreparedPublications(ctx, token, r); err != nil {
+		e.handleReviewError(r, log, err)
+		return
+	}
+	e.failHeadChanged(r, log)
+}
+
+func (e *Engine) reconcilePreparedPublications(ctx context.Context, token string, r *store.Review) error {
+	publications, err := e.st.ListReviewPublications(r.ID)
+	if err != nil {
+		return errors.Join(store.ErrPublicationReconcile, err)
+	}
+	for _, publication := range publications {
+		if !uncertainDeliveryStatus(publication.Status) {
+			continue
+		}
+		if publication.Status == store.PublicationSending {
+			claimed, claimErr := e.st.ClaimPublicationForSend(r.ID, r.ExecutionGeneration, publication.ID, r.ServiceLeaseOwner, r.ClaimFence)
+			if errors.Is(claimErr, store.ErrPublicationReconcile) {
+				// The stale handoff is now marker-only; continue with the
+				// read-only reconciliation path below.
+			} else if claimErr != nil {
+				return errors.Join(store.ErrPublicationReconcile, claimErr)
+			} else if !claimed {
+				return errors.Join(store.ErrPublicationReconcile, errPublicationInFlight)
+			}
+		}
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
+			return errors.Join(store.ErrPublicationReconcile, err)
+		}
+		commentID, found, err := e.findPublication(ctx, token, r, publication)
+		if err != nil {
+			return errors.Join(store.ErrPublicationReconcile, err)
+		}
+		if !found {
+			return store.ErrPublicationReconcile
+		}
+		if err := e.reviewSideEffectError(ctx, r); err != nil {
+			return errors.Join(store.ErrPublicationReconcile, err)
+		}
+		if err := e.st.MarkPublicationPosted(r.ID, r.ExecutionGeneration, publication.ID, commentID, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
+			return errors.Join(store.ErrPublicationReconcile, err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) reviewSideEffectError(ctx context.Context, r *store.Review) error {
+	if err := e.processError(ctx); err != nil {
+		return err
+	}
+	current, err := e.st.ReviewLeaseCurrent(r.ID, r.ExecutionGeneration, r.ServiceLeaseOwner, r.ClaimFence)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return store.ErrReviewLeaseLost
+	}
+	return nil
+}
+
+func (e *Engine) reviewCompletionSideEffectError(ctx context.Context, r *store.Review) error {
+	if err := e.processError(ctx); err != nil {
+		return err
+	}
+	current, err := e.st.ReviewCompletionLeaseCurrent(r.ID, r.ExecutionGeneration, r.ServiceLeaseOwner, r.ClaimFence)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return store.ErrReviewLeaseLost
+	}
+	return nil
 }
 
 func (e *Engine) failReview(r *store.Review, log *slog.Logger, message string) {

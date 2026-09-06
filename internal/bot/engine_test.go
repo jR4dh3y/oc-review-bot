@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -238,4 +239,301 @@ func TestHeadChangeSkipsAllResultComments(t *testing.T) {
 	if got.Status != store.StatusFailed || !strings.Contains(got.Error, "pull request changed") {
 		t.Fatalf("stale review = %+v", got)
 	}
+}
+
+func TestPreparedHeadChangeReconcilesUncertainPublication(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		markerFound bool
+		wantStatus  string
+		wantPub     string
+	}{
+		{name: "marker found", markerFound: true, wantStatus: store.StatusFailed, wantPub: store.PublicationPosted},
+		{name: "marker absent", markerFound: false, wantStatus: store.StatusReconciliationRequired, wantPub: store.PublicationReconciliationRequired},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var marker string
+			var postCount int
+			github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/repos/octo/repo/issues/7/comments" {
+					comments := []map[string]any{}
+					if test.markerFound {
+						comments = append(comments, map[string]any{
+							"id":   int64(321),
+							"body": marker,
+							"user": map[string]int64{"id": 707},
+						})
+					}
+					_ = json.NewEncoder(w).Encode(comments)
+					return
+				}
+				if r.Method == http.MethodPost {
+					postCount++
+				}
+				http.NotFound(w, r)
+			}))
+			defer github.Close()
+			app := newBotTestApp(t, github.URL)
+
+			cipher, err := seal.New("prepared-head-change-" + test.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, err := store.Open(t.TempDir()+"/reviews.db", cipher)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			review := &store.Review{
+				RepoFull:          "octo/repo",
+				RepositoryID:      7,
+				PRNumber:          7,
+				InstallationID:    1,
+				RequesterGitHubID: 42,
+				RequesterLogin:    "alice",
+				TriggerCommentID:  99,
+			}
+			if err := st.CreateReview(review); err != nil {
+				t.Fatal(err)
+			}
+			lease := testEngineLease(t, st, "prepared-head-change-"+test.name)
+			claimed, ok, err := st.ClaimReviewByID(review.ID, lease.OwnerToken, lease.Fence)
+			if err != nil || !ok {
+				t.Fatalf("claim review = %+v, %v, %v", claimed, ok, err)
+			}
+			if err := st.SetHeadSHA(review.ID, claimed.ExecutionGeneration, "old-sha", lease.OwnerToken, lease.Fence); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.PrepareReviewPublication(review.ID, claimed.ExecutionGeneration, store.PublicationPlan{
+				SummaryMD:     "summary",
+				SummaryBodyMD: "summary body",
+				CommitSHA:     "old-sha",
+			}, lease.OwnerToken, lease.Fence); err != nil {
+				t.Fatal(err)
+			}
+			publications, err := st.ListReviewPublications(review.ID)
+			if err != nil || len(publications) != 1 {
+				t.Fatalf("publications = %+v, %v", publications, err)
+			}
+			publication := publications[0]
+			marker = publication.Marker
+			if err := st.MarkPublicationReconciliationRequired(review.ID, claimed.ExecutionGeneration, publication.ID, lease.OwnerToken, lease.Fence); err != nil {
+				t.Fatal(err)
+			}
+			running, err := st.Review(review.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			engine := NewEngine(&config.Config{}, st, app, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine.startMu.Lock()
+			engine.started = true
+			engine.ready = true
+			engine.leaseOwner = lease.OwnerToken
+			engine.leaseFence = lease.Fence
+			engine.startMu.Unlock()
+			defer st.ReleaseServiceLease(lease.OwnerToken, lease.Fence)
+
+			engine.handlePreparedHeadChanged(context.Background(), "installation-token", running, engine.log)
+			got, err := st.Review(review.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != test.wantStatus {
+				t.Fatalf("review status = %q, want %q; review=%+v", got.Status, test.wantStatus, got)
+			}
+			gotPublications, err := st.ListReviewPublications(review.ID)
+			if err != nil || len(gotPublications) != 1 || gotPublications[0].Status != test.wantPub {
+				t.Fatalf("publication = %+v, %v; want %q", gotPublications, err, test.wantPub)
+			}
+			if postCount != 0 {
+				t.Fatalf("reconciliation posted %d replacement comments", postCount)
+			}
+		})
+	}
+}
+
+func TestRunWithPoolRequiresCurrentReviewLeaseBeforeOpenCode(t *testing.T) {
+	st := testStoreForEngine(t)
+	review := &store.Review{
+		RepoFull:          "octo/repo",
+		RepositoryID:      7,
+		PRNumber:          7,
+		InstallationID:    1,
+		RequesterGitHubID: 42,
+		RequesterLogin:    "alice",
+		TriggerCommentID:  99,
+	}
+	if err := st.CreateReview(review); err != nil {
+		t.Fatal(err)
+	}
+	lease := testEngineLease(t, st, "run-fence")
+	claimed, ok, err := st.ClaimReviewByID(review.ID, lease.OwnerToken, lease.Fence)
+	if err != nil || !ok {
+		t.Fatalf("claim review = %+v, %v, %v", claimed, ok, err)
+	}
+	if err := st.FinishReviewFailed(review.ID, claimed.ExecutionGeneration, "test lease loss", lease.OwnerToken, lease.Fence); err != nil {
+		t.Fatal(err)
+	}
+
+	runCalled := false
+	engine := NewEngine(&config.Config{}, st, nil, pool.New(st, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine.run = func(context.Context, runner.Options) (string, error) {
+		runCalled = true
+		return "unexpected", nil
+	}
+	engine.startMu.Lock()
+	engine.started = true
+	engine.ready = true
+	engine.leaseOwner = lease.OwnerToken
+	engine.leaseFence = lease.Fence
+	engine.startMu.Unlock()
+	defer st.ReleaseServiceLease(lease.OwnerToken, lease.Fence)
+
+	_, _, err = engine.runWithPool(context.Background(), "installation-token", claimed, "model", nil, engine.log)
+	if !errors.Is(err, store.ErrReviewLeaseLost) {
+		t.Fatalf("runWithPool error = %v, want review lease loss", err)
+	}
+	if runCalled {
+		t.Fatal("OpenCode runner was called after the review lease was lost")
+	}
+}
+
+func TestPublishPreparedFencesGitHubWriteAfterReviewLeaseLoss(t *testing.T) {
+	var st *store.Store
+	var reviewID int64
+	var generation int64
+	var owner string
+	var fence int64
+	markerLookupRevoked := false
+	postCount := 0
+	var revokeErr error
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/repo/pulls/7":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 7,
+				"head":   map[string]string{"sha": "head-sha", "ref": "feature"},
+				"base": map[string]any{
+					"sha":  "base-sha",
+					"repo": map[string]any{"id": 7, "full_name": "octo/repo"},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/repo/issues/7/comments":
+			if !markerLookupRevoked {
+				markerLookupRevoked = true
+				revokeErr = st.FinishReviewFailed(reviewID, generation, "test review lease loss", owner, fence)
+				if revokeErr != nil {
+					http.Error(w, revokeErr.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost:
+			postCount++
+			http.Error(w, "unexpected GitHub write", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+	app := newBotTestApp(t, github.URL)
+	st = testStoreForEngine(t)
+	review := &store.Review{
+		RepoFull:          "octo/repo",
+		RepositoryID:      7,
+		PRNumber:          7,
+		InstallationID:    1,
+		RequesterGitHubID: 42,
+		RequesterLogin:    "alice",
+		TriggerCommentID:  99,
+	}
+	if err := st.CreateReview(review); err != nil {
+		t.Fatal(err)
+	}
+	reviewID = review.ID
+	lease := testEngineLease(t, st, "publication-write-fence")
+	owner, fence = lease.OwnerToken, lease.Fence
+	claimed, ok, err := st.ClaimReviewByID(review.ID, owner, fence)
+	if err != nil || !ok {
+		t.Fatalf("claim review = %+v, %v, %v", claimed, ok, err)
+	}
+	generation = claimed.ExecutionGeneration
+	pr := &gh.PR{Number: 7}
+	pr.Head.SHA = "head-sha"
+	pr.Head.Ref = "feature"
+	pr.Base.SHA = "base-sha"
+	pr.Base.Repo.ID = 7
+	pr.Base.Repo.FullName = "octo/repo"
+	if err := st.SetReviewRevision(review.ID, generation, "octo/repo", pr.Head.SHA, pr.RevisionToken(), owner, fence); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PrepareReviewPublication(review.ID, generation, store.PublicationPlan{
+		SummaryMD:     "summary",
+		SummaryBodyMD: "summary body",
+		CommitSHA:     "head-sha",
+	}, owner, fence); err != nil {
+		t.Fatal(err)
+	}
+	running, err := st.Review(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(&config.Config{}, st, app, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine.startMu.Lock()
+	engine.started = true
+	engine.ready = true
+	engine.leaseOwner = owner
+	engine.leaseFence = fence
+	engine.startMu.Unlock()
+	defer st.ReleaseServiceLease(owner, fence)
+
+	err = engine.publishPrepared(context.Background(), "installation-token", running)
+	if !errors.Is(err, store.ErrReviewLeaseLost) {
+		t.Fatalf("publishPrepared error = %v, want review lease loss", err)
+	}
+	if revokeErr != nil {
+		t.Fatalf("revoke review lease = %v", revokeErr)
+	}
+	if postCount != 0 {
+		t.Fatalf("published %d comments after review lease loss", postCount)
+	}
+}
+
+func testStoreForEngine(t *testing.T) *store.Store {
+	t.Helper()
+	cipher, err := seal.New("engine-store-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.TempDir()+"/reviews.db", cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func testEngineLease(t *testing.T, st *store.Store, owner string) store.ServiceLease {
+	t.Helper()
+	lease, acquired, err := st.AcquireServiceLeaseWithFence(owner, time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("acquire engine lease = %+v, %v, %v", lease, acquired, err)
+	}
+	return lease
+}
+
+func newBotTestApp(t *testing.T, base string) *gh.App {
+	t.Helper()
+	t.Setenv("GITHUB_API_BASE", base)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemText := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	app, err := gh.NewApp("1", string(pemText), "webhook-secret", 707)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
 }

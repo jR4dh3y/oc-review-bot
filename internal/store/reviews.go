@@ -318,6 +318,18 @@ func claimDelivery(tx *sql.Tx, deliveryID, createdAt string) (bool, error) {
 	return rows > 0, err
 }
 
+// PurgeDeliveriesBefore removes webhook replay markers older than cutoff.
+// Retention must stay longer than GitHub's redelivery window so a late
+// redelivery is still deduplicated; the engine purges on a fixed cadence.
+func (s *Store) PurgeDeliveriesBefore(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM webhook_deliveries WHERE created_at < ?`,
+		cutoff.UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func countReviewsSince(tx *sql.Tx, where string, value int64) (int, error) {
 	var count int
 	cutoff := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
@@ -618,6 +630,18 @@ func (s *Store) ReviewLeaseCurrent(id, generation int64, owner string, fence int
 			WHERE id = ? AND status = ? AND execution_generation = ? AND service_lease_owner = ? AND claim_fence = ?
 			  AND EXISTS (SELECT 1 FROM service_leases WHERE id = 1 AND owner_token = ? AND fence = ? AND expires_at > ?)`,
 		id, StatusRunning, generation, owner, fence, owner, fence, serviceLeaseTime(time.Now().UTC())).Scan(&count)
+	return count == 1, err
+}
+
+// ReviewCompletionLeaseCurrent reports whether the current worker completed
+// the review while retaining the service lease. The completion reaction is a
+// best-effort GitHub write that happens after the durable done transition.
+func (s *Store) ReviewCompletionLeaseCurrent(id, generation int64, owner string, fence int64) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews
+			WHERE id = ? AND status IN (?, ?) AND execution_generation = ? AND service_lease_owner = ? AND claim_fence = ?
+			  AND EXISTS (SELECT 1 FROM service_leases WHERE id = 1 AND owner_token = ? AND fence = ? AND expires_at > ?)`,
+		id, StatusRunning, StatusDone, generation, owner, fence, owner, fence, serviceLeaseTime(time.Now().UTC())).Scan(&count)
 	return count == 1, err
 }
 

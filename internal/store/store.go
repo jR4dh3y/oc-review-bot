@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 	delivery_id TEXT PRIMARY KEY,
 	created_at  TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at ON webhook_deliveries(created_at);
 CREATE TABLE IF NOT EXISTS service_leases (
 	id          INTEGER PRIMARY KEY CHECK (id = 1),
 	owner_token TEXT NOT NULL,

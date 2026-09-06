@@ -440,6 +440,9 @@ func TestReviewLifecyclePersistsDurablePublication(t *testing.T) {
 	if err := s.FinishReviewDone(r.ID, claimed.ExecutionGeneration, owner, lease.Fence); err != nil {
 		t.Fatal(err)
 	}
+	if current, err := s.ReviewCompletionLeaseCurrent(r.ID, claimed.ExecutionGeneration, owner, lease.Fence); err != nil || !current {
+		t.Fatalf("completion lease = %v, %v", current, err)
+	}
 
 	findings, err := s.ListFindings(r.ID)
 	if err != nil || len(findings) != 1 || findings[0].PostedCommentID != 444 {
@@ -603,6 +606,44 @@ func TestExpiredPublicationBecomesMarkerOnlyReconciliation(t *testing.T) {
 	}
 	if review.Status != StatusReconciliationRequired || review.Error != "operator review" || review.ServiceLeaseOwner != "" {
 		t.Fatalf("reconciliation review = %+v", review)
+	}
+	replacement := reviewFixture(r.RepositoryID, r.PRNumber, r.RequesterGitHubID, 111)
+	if err := s.CreateReview(replacement); !errors.Is(err, ErrActiveReview) {
+		t.Fatalf("replacement review admission = %v, want ErrActiveReview", err)
+	}
+}
+
+func TestPurgeDeliveriesBeforeRetainsRecentMarkers(t *testing.T) {
+	s := testStore(t)
+	nowTime := time.Now().UTC()
+	oldAt := nowTime.Add(-2 * time.Hour).Format(time.RFC3339)
+	recentAt := nowTime.Add(-30 * time.Minute).Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO webhook_deliveries (delivery_id, created_at) VALUES (?, ?), (?, ?)`,
+		"old-delivery", oldAt, "recent-delivery", recentAt); err != nil {
+		t.Fatal(err)
+	}
+
+	purged, err := s.PurgeDeliveriesBefore(nowTime.Add(-time.Hour))
+	if err != nil || purged != 1 {
+		t.Fatalf("purged = %d, %v; want one old marker", purged, err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM webhook_deliveries WHERE delivery_id = ?`, "old-delivery").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("old delivery marker was retained")
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM webhook_deliveries WHERE delivery_id = ?`, "recent-delivery").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("recent delivery marker was purged")
+	}
+	var indexName string
+	if err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`,
+		"idx_webhook_deliveries_created_at").Scan(&indexName); err != nil {
+		t.Fatalf("delivery retention index = %v", err)
 	}
 }
 

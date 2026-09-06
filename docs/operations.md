@@ -105,6 +105,41 @@ For backups, use SQLite's backup mechanism or stop the service before copying da
 snapshot/copy is taken while the service is running, it must preserve the database, WAL, and shared
 memory files consistently. Test restoration into an isolated environment before relying on a backup.
 
+## Publication reconciliation runbook
+
+The review and publication outboxes are durable, but a process can still lose its local
+acknowledgement after GitHub accepts a comment. In that case the review is shown as
+`reconciliation_required` and remains the active review for that immutable repository/PR pair. This
+is an intentional quarantine: a new mention must not create a duplicate comment while the remote
+result is uncertain.
+
+1. Open the review in the dashboard and record the review ID, PR URL, status, error, and affected
+   publication. For read-only inspection, query `reviews` and `review_publications` from a consistent
+   SQLite backup or maintenance copy; do not edit the live database while the service is running.
+2. Search the target PR's issue comments for the exact opaque marker, requiring both the service bot
+   author and the marker value. The service performs the same bounded search automatically: at most
+   50 pages of 100 comments for each issue or inline-comment endpoint. Do not search by summary text
+   alone and do not create a replacement comment.
+3. If the marker is found, leave the row quarantined. The worker retries marker reconciliation every
+   five minutes and will record the verified GitHub comment ID, finish the publication, and release
+   the review lock. Restarting the service is safe: startup recovery preserves uncertain sends until
+   their bounded handoff window expires, then switches them to marker-only reconciliation.
+4. If the marker is not found, treat delivery as unknown rather than as failed. Check GitHub audit
+   logs, API responses, ingress/proxy logs, and the service log for the original request. Keep the
+   review quarantined until the incident owner can account for the remote effect. Never delete the
+   publication row, clear `reconciliation_required`, or manually post a replacement from an
+   unverified copy of the result; any of those actions can create duplicate or stale review output.
+   If the PR must proceed before the incident is resolved, quarantine the bot operationally for that
+   repository and use a separate PR/revision according to the organization's incident policy.
+
+There is deliberately no admin endpoint that marks an absent marker as safe: only an exact
+bot-authored marker plus a GitHub comment ID can close the uncertainty. The dashboard status and
+logs provide the operator handoff, while the durable worker supplies the only safe automatic repair.
+Webhook delivery markers are retained for seven days and purged at most every six hours; that is
+longer than GitHub's normal redelivery window. After retention expires, the delivery ID alone may be
+accepted again, but immutable trigger and active-review uniqueness constraints still prevent the
+same review event from creating an unsafe duplicate.
+
 ## Zen key-pool governance
 
 OpenCode Zen is a paid, usage-based provider. Add API keys only from accounts that are authorized
