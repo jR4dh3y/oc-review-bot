@@ -45,10 +45,10 @@ fmt-check:
 		exit 1; \
 	fi
 
-vet:
+vet: web-build
 	$(GO) vet ./...
 
-test:
+test: web-build
 	$(GO) test ./...
 
 web-build:
