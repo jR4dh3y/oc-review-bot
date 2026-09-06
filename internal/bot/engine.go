@@ -786,7 +786,10 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 }
 
 func (e *Engine) preparePublication(r *store.Review, pr *gh.PR, idx *review.DiffIndex, result review.ReviewResult) error {
-	filtered := review.ReviewResult{SummaryMD: result.SummaryMD}
+	filtered := review.ReviewResult{
+		SummaryMD:       result.SummaryMD,
+		SequenceDiagram: result.SequenceDiagram,
+	}
 	plan := store.PublicationPlan{
 		SummaryMD: result.SummaryMD,
 		CommitSHA: pr.Head.SHA,
