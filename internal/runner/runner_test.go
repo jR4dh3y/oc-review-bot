@@ -99,6 +99,53 @@ func TestOpencodeRunArgsPutStandaloneAfterRun(t *testing.T) {
 	}
 }
 
+func TestAgentRunArgsSelectsByEngine(t *testing.T) {
+	opts := Options{Model: "opencode/big-pickle", Prompt: "review"}
+	if got := agentRunArgs(opts); got[0] != "run" {
+		t.Fatalf("default engine args = %q, want the opencode2 run form", got)
+	}
+	opts.Engine = EnginePi
+	if got := agentRunArgs(opts); got[0] != "--print" {
+		t.Fatalf("pi engine args = %q, want the pi print form", got)
+	}
+}
+
+func TestPiRunArgsKeepReviewerReadOnlyAndStateless(t *testing.T) {
+	got := piRunArgs(Options{Model: "opencode/big-pickle", Prompt: "review it"})
+	wantPrefix := []string{
+		"--print",
+		"--model", "opencode/big-pickle",
+		"--tools", "read,grep,find,ls",
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+		"--no-themes",
+		"--no-context-files",
+		"--no-session",
+		"--no-approve",
+	}
+	if len(got) != len(wantPrefix)+4 {
+		t.Fatalf("args = %q, want %d fixed entries plus prompt parts", got, len(wantPrefix))
+	}
+	for i := range wantPrefix {
+		if got[i] != wantPrefix[i] {
+			t.Fatalf("args = %q, want fixed prefix %q", got, wantPrefix)
+		}
+	}
+	rest := got[len(wantPrefix):]
+	if rest[0] != "--append-system-prompt" || rest[1] != reviewerSafetyPrompt {
+		t.Fatalf("system prompt args = %q, want the reviewer safety prompt", rest)
+	}
+	if rest[2] != "@"+sandboxDiffPath || got[len(got)-1] != "review it" {
+		t.Fatalf("args = %q, want the diff attachment before the prompt", got)
+	}
+	for _, banned := range []string{"bash", "edit", "write", "webfetch", "--api-key"} {
+		if strings.Contains(strings.Join(got, " "), banned) {
+			t.Fatalf("args = %q, must not contain %q", got, banned)
+		}
+	}
+}
+
 func TestSandboxCommandBindsHostDataDir(t *testing.T) {
 	dir := t.TempDir()
 	mkfile := func(name string) *os.File {
@@ -113,7 +160,7 @@ func TestSandboxCommandBindsHostDataDir(t *testing.T) {
 	files := &sandboxFiles{config: mkfile("opencode.json"), auth: mkfile("auth.json")}
 	dataDir := filepath.Join(dir, "xdg-data")
 	args := sandboxCommand(
-		sandboxRuntime{bwrap: "bwrap", runtimeDir: dir, binary: "/opt/opencode-runtime/bin/opencode2"},
+		sandboxRuntime{engine: EngineOpenCode2, bwrap: "bwrap", runtimeDir: dir, binary: "/opt/opencode-runtime/bin/opencode2"},
 		filepath.Join(dir, "checkout"), files, dataDir, []string{"run"},
 	)
 	bound := false
@@ -127,6 +174,52 @@ func TestSandboxCommandBindsHostDataDir(t *testing.T) {
 	}
 	if !bound {
 		t.Fatalf("xdg-data must bind %q, args = %q", dataDir, args)
+	}
+}
+
+func TestSandboxCommandForPiKeepsConfigIsolated(t *testing.T) {
+	dir := t.TempDir()
+	mkfile := func(name string) *os.File {
+		t.Helper()
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { f.Close() })
+		return f
+	}
+	files := &sandboxFiles{config: mkfile("settings.json"), auth: mkfile("auth.json")}
+	paths := sandboxRuntime{engine: EnginePi, bwrap: "bwrap", runtimeDir: dir, binary: sandboxPiRoot + "/bin/pi"}
+	args := sandboxCommand(paths, filepath.Join(dir, "checkout"), files, filepath.Join(dir, "xdg-data"), []string{"--version"})
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--tmpfs /pi-config") {
+		t.Fatalf("pi config dir must be a tmpfs, args = %q", args)
+	}
+	if !strings.Contains(joined, "--ro-bind-data 3 /pi-config/settings.json") ||
+		!strings.Contains(joined, "--ro-bind-data 4 /pi-config/auth.json") {
+		t.Fatalf("pi settings and auth must arrive as read-only FDs, args = %q", args)
+	}
+	if !strings.Contains(joined, "--ro-bind "+dir+" "+sandboxPiRoot) {
+		t.Fatalf("pi runtime must mount at %s, args = %q", sandboxPiRoot, args)
+	}
+	if strings.Contains(joined, "OPENCODE") {
+		t.Fatalf("pi sandbox must not carry OpenCode environment, args = %q", args)
+	}
+	for _, want := range []string{
+		"--setenv PI_CODING_AGENT_DIR /pi-config",
+		"--setenv PI_OFFLINE 1",
+		"--setenv PI_SKIP_VERSION_CHECK 1",
+		"--setenv PI_TELEMETRY 0",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("pi sandbox environment missing %q, args = %q", want, args)
+		}
+	}
+	for i := 0; i+2 < len(args); i++ {
+		if args[i] == "--bind" && args[i+2] == "/xdg-data" {
+			t.Fatalf("pi sandbox must not bind a host data directory, args = %q", args)
+		}
 	}
 }
 
@@ -232,6 +325,9 @@ func TestQuotaDetection(t *testing.T) {
 		"HTTP 429 Too Many Requests":                      true,
 		"provider status code: 402":                       true,
 		"Zen quota has been exceeded":                     true,
+		"429: {\"type\":\"RateLimitError\"}":              true,
+		"402: {\"type\":\"error\"}":                       true,
+		"401: {\"type\":\"AuthError\"}":                   false,
 		"the review's context window was exceeded":        false,
 		"source text mentions a credit balance":           false,
 		"rate limit documentation was included in output": false,
@@ -285,18 +381,31 @@ func testBubblewrapPath() (string, error) {
 // fakeRuntime creates a self-contained trusted runtime. Its scripts run with
 // a copied POSIX shell so the production sandbox need not expose host /usr.
 func fakeRuntime(t *testing.T, script string, extraBinaries ...string) (bin, runtimeDir string) {
+	return fakeEngineRuntime(t, EngineOpenCode2, script, extraBinaries...)
+}
+
+// fakePiRuntime stages a fake pi executable under the pi runtime root.
+func fakePiRuntime(t *testing.T, script string) (bin, runtimeDir string) {
+	return fakeEngineRuntime(t, EnginePi, script)
+}
+
+func fakeEngineRuntime(t *testing.T, engine, script string, extraBinaries ...string) (bin, runtimeDir string) {
 	t.Helper()
+	root, name := sandboxOpenCodeRoot, "opencode2"
+	if engine == EnginePi {
+		root, name = sandboxPiRoot, "pi"
+	}
 	runtimeDir = filepath.Join(t.TempDir(), "runtime")
 	binDir := filepath.Join(runtimeDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	copyRuntimeBinary(t, "sh", filepath.Join(binDir, "sh"))
-	for _, name := range extraBinaries {
-		copyRuntimeBinary(t, name, filepath.Join(binDir, name))
+	for _, extra := range extraBinaries {
+		copyRuntimeBinary(t, extra, filepath.Join(binDir, extra))
 	}
-	bin = filepath.Join(binDir, "opencode2")
-	if err := os.WriteFile(bin, []byte("#!/opt/opencode-runtime/bin/sh\n"+script), 0o755); err != nil {
+	bin = filepath.Join(binDir, name)
+	if err := os.WriteFile(bin, []byte("#!"+root+"/bin/sh\n"+script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return bin, runtimeDir
@@ -353,6 +462,49 @@ IFS= read -r config < "$XDG_CONFIG_HOME/opencode/opencode.json" || true
 [ ! -w review-diff.patch ] || exit 103
 	case " $* " in *' --auto '*) exit 104;; esac
 printf '%s\n' '{"type":"text","text":"Reviewed the diff."}'
+`
+
+// isolatedPiReviewerScript mirrors isolatedReviewerScript for the pi engine:
+// fixed print-mode flags, isolated PI_CODING_AGENT_DIR credential store, no
+// host environment secrets, and a hardened checkout. It prints the final
+// message as plain text, like the real pi --print.
+const isolatedPiReviewerScript = `
+set -eu
+[ "$1" = --print ] || exit 80
+[ "$2" = --model ] || exit 81
+[ "$3" = opencode/test-model ] || exit 82
+[ "$4" = --tools ] || exit 83
+[ "$5" = read,grep,find,ls ] || exit 84
+[ "$PI_CODING_AGENT_DIR" = /pi-config ] || exit 85
+[ "$PI_OFFLINE" = 1 ] || exit 86
+[ "$PI_SKIP_VERSION_CHECK" = 1 ] || exit 87
+[ "$PI_TELEMETRY" = 0 ] || exit 88
+[ -z "${OPENCODE_API_KEY+x}" ] || exit 89
+[ -z "${GITHUB_TOKEN+x}" ] || exit 90
+[ -z "${AWS_SECRET_ACCESS_KEY+x}" ] || exit 91
+[ -f "$PI_CODING_AGENT_DIR/settings.json" ] || exit 92
+[ -f "$PI_CODING_AGENT_DIR/auth.json" ] || exit 93
+IFS= read -r auth < "$PI_CODING_AGENT_DIR/auth.json" || true
+case "$auth" in *'"opencode"'*'"type":"api_key"'*'"key":"sk-test-9999"'*) ;; *) exit 94;; esac
+IFS= read -r settings < "$PI_CODING_AGENT_DIR/settings.json" || true
+case "$settings" in *'"defaultProjectTrust":"never"'*'"enableInstallTelemetry":false'*) ;; *) exit 95;; esac
+[ -f review-diff.patch ] || exit 96
+[ ! -e .pi ] || exit 97
+[ ! -e .git ] || exit 98
+[ ! -e AGENTS.md ] || exit 99
+[ ! -e nested/AGENTS.md ] || exit 100
+[ ! -e /tmp/oc-review-runner-host-secret ] || exit 101
+[ ! -w review-diff.patch ] || exit 102
+case " $* " in *' --no-extensions '*) ;; *) exit 103;; esac
+case " $* " in *' --no-skills '*) ;; *) exit 104;; esac
+case " $* " in *' --no-context-files '*) ;; *) exit 105;; esac
+case " $* " in *' --no-session '*) ;; *) exit 106;; esac
+case " $* " in *' --no-approve '*) ;; *) exit 107;; esac
+case " $* " in *' --append-system-prompt '*) ;; *) exit 108;; esac
+case " $* " in *' @/workspace/review-diff.patch '*) ;; *) exit 109;; esac
+case " $* " in *' --api-key '*) exit 110;; esac
+case " $* " in *' bash '*|*' edit '*|*' write '*) exit 111;; esac
+printf '%s\n' 'Reviewed the diff.'
 `
 
 // gitRun runs a git command and fails the test on error.
@@ -413,6 +565,7 @@ func initRemote(t *testing.T, extraFiles map[string][]byte) (string, string) {
 func runOptions(bin, runtimeDir, remote, head string) Options {
 	bubblewrapBin, _ := testBubblewrapPath()
 	return Options{
+		Engine:             EngineOpenCode2,
 		Bin:                bin,
 		RuntimeDir:         runtimeDir,
 		RunArgs:            []string{"--standalone"},
@@ -429,8 +582,17 @@ func runOptions(bin, runtimeDir, remote, head string) Options {
 	}
 }
 
+// piRunOptions mirrors runOptions for the pi engine: same trusted-runtime
+// contract, but no configurable run flags.
+func piRunOptions(bin, runtimeDir, remote, head string) Options {
+	opts := runOptions(bin, runtimeDir, remote, head)
+	opts.Engine = EnginePi
+	opts.RunArgs = nil
+	return opts
+}
+
 func TestSandboxFilesUseValidJSON(t *testing.T) {
-	files, err := newSandboxFiles(t.TempDir(), `sk-test-"quoted"`)
+	files, err := newSandboxFiles(t.TempDir(), `sk-test-\"quoted\"`, EngineOpenCode2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,14 +610,49 @@ func TestSandboxFilesUseValidJSON(t *testing.T) {
 	if err := json.Unmarshal(contents, &auth); err != nil {
 		t.Fatalf("auth JSON is invalid: %v", err)
 	}
-	if auth.OpenCode.Type != "api" || auth.OpenCode.Key != `sk-test-"quoted"` {
+	if auth.OpenCode.Type != "api" || auth.OpenCode.Key != `sk-test-\"quoted\"` {
 		t.Fatalf("auth = %+v", auth.OpenCode)
+	}
+}
+
+func TestSandboxFilesForPiUseZenCredentialStore(t *testing.T) {
+	files, err := newSandboxFiles(t.TempDir(), `sk-test-\"quoted\"`, EnginePi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	auth, err := os.ReadFile(files.auth.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		OpenCode struct {
+			Type string `json:"type"`
+			Key  string `json:"key"`
+		} `json:"opencode"`
+	}
+	if err := json.Unmarshal(auth, &parsed); err != nil {
+		t.Fatalf("auth JSON is invalid: %v", err)
+	}
+	if parsed.OpenCode.Type != "api_key" || parsed.OpenCode.Key != `sk-test-\"quoted\"` {
+		t.Fatalf("auth = %+v", parsed.OpenCode)
+	}
+	settings, err := os.ReadFile(files.config.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsedSettings map[string]any
+	if err := json.Unmarshal(settings, &parsedSettings); err != nil {
+		t.Fatalf("settings JSON is invalid: %v", err)
+	}
+	if parsedSettings["defaultProjectTrust"] != "never" || parsedSettings["enableInstallTelemetry"] != false {
+		t.Fatalf("settings = %v", parsedSettings)
 	}
 }
 
 func TestHardenCheckoutRemovesNestedInstructions(t *testing.T) {
 	dir := t.TempDir()
-	for _, path := range []string{"AGENTS.md", "nested/AGENTS.md", "nested/opencode.json", ".opencode/plugin.ts"} {
+	for _, path := range []string{"AGENTS.md", "nested/AGENTS.md", "nested/opencode.json", ".opencode/plugin.ts", ".pi/settings.json"} {
 		fullPath := filepath.Join(dir, path)
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 			t.Fatal(err)
@@ -467,7 +664,7 @@ func TestHardenCheckoutRemovesNestedInstructions(t *testing.T) {
 	if err := hardenCheckout(dir); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"AGENTS.md", "nested/AGENTS.md", "nested/opencode.json", ".opencode"} {
+	for _, path := range []string{"AGENTS.md", "nested/AGENTS.md", "nested/opencode.json", ".opencode", ".pi"} {
 		if _, err := os.Lstat(filepath.Join(dir, path)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("untrusted path %q survived hardening: %v", path, err)
 		}
@@ -506,8 +703,69 @@ if [ "$1" = --version ]; then printf '%s\n' 'opencode2 vtest'; elif [ "$1" = run
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Preflight(bin, runtimeDir, bubblewrapBin); err != nil {
+	if err := Preflight(bin, runtimeDir, bubblewrapBin, EngineOpenCode2); err != nil {
 		t.Fatalf("Preflight() error = %v", err)
+	}
+}
+
+func TestPreflightRunsPiInsideSandbox(t *testing.T) {
+	requireBubblewrap(t)
+	bin, runtimeDir := fakePiRuntime(t, `
+set -eu
+if [ "$1" = --version ]; then printf '%s\n' 'pi vtest';
+elif [ "$1" = --list-models ]; then [ "$2" = opencode ] || exit 2; [ "$PI_CODING_AGENT_DIR" = /pi-config ] || exit 3;
+else exit 1; fi
+`)
+	bubblewrapBin, err := testBubblewrapPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Preflight(bin, runtimeDir, bubblewrapBin, EnginePi); err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+}
+
+func TestRunPiEndToEndWithSandbox(t *testing.T) {
+	requireBubblewrap(t)
+	const hostSecret = "/tmp/oc-review-runner-host-secret"
+	if err := os.WriteFile(hostSecret, []byte("host-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(hostSecret) })
+
+	remote, head := initRemote(t, map[string][]byte{".pi/settings.json": []byte(`{"malicious":true}`)})
+	bin, runtimeDir := fakePiRuntime(t, isolatedPiReviewerScript)
+	t.Setenv("GITHUB_TOKEN", "github-token-must-not-reach-reviewer")
+	// A host Zen key must never reach pi through the environment; the pooled
+	// key travels only through the isolated auth.json credential store.
+	t.Setenv("OPENCODE_API_KEY", "zen-key-must-not-reach-reviewer")
+
+	got, err := Run(context.Background(), piRunOptions(bin, runtimeDir, remote, head))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "Reviewed the diff." {
+		t.Fatalf("output = %q, want the pi final message verbatim", got)
+	}
+}
+
+func TestRunRejectsUnknownEngine(t *testing.T) {
+	remote, head := initRemote(t, nil)
+	bin, runtimeDir := fakeRuntime(t, isolatedReviewerScript)
+	opts := runOptions(bin, runtimeDir, remote, head)
+	opts.Engine = "claude"
+	if _, err := Run(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "engine must be opencode2 or pi") {
+		t.Fatalf("error = %v, want engine rejection", err)
+	}
+}
+
+func TestRunRejectsPiRunWithConfigurableFlags(t *testing.T) {
+	remote, head := initRemote(t, nil)
+	bin, runtimeDir := fakePiRuntime(t, isolatedPiReviewerScript)
+	opts := piRunOptions(bin, runtimeDir, remote, head)
+	opts.RunArgs = []string{"--standalone"}
+	if _, err := Run(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "RunArgs must be empty") {
+		t.Fatalf("error = %v, want pi fixed-flags rejection", err)
 	}
 }
 

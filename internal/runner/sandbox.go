@@ -20,11 +20,13 @@ import (
 var ErrSandboxUnavailable = errors.New("bubblewrap review sandbox unavailable")
 
 const (
-	sandboxRuntimeRoot = "/opt/opencode-runtime"
-	sandboxWorkspace   = "/workspace"
-	sandboxDiffPath    = sandboxWorkspace + "/review-diff.patch"
-	configFD           = 3
-	authFD             = 4
+	sandboxOpenCodeRoot = "/opt/opencode-runtime"
+	sandboxPiRoot       = "/opt/pi-runtime"
+	sandboxPiConfig     = "/pi-config"
+	sandboxWorkspace    = "/workspace"
+	sandboxDiffPath     = sandboxWorkspace + "/review-diff.patch"
+	configFD            = 3
+	authFD              = 4
 
 	sandboxHomeTmpfsSize      = "16777216" // 16 MiB
 	sandboxConfigTmpfsSize    = "8388608"  // 8 MiB
@@ -36,6 +38,7 @@ const (
 )
 
 type sandboxRuntime struct {
+	engine     string
 	bwrap      string
 	runtimeDir string
 	binary     string
@@ -62,11 +65,18 @@ func (f *sandboxFiles) Close() {
 
 // Preflight verifies that the configured runtime can be launched inside the
 // same Bubblewrap profile used for reviews. It performs no model request.
-func Preflight(bin, runtimeDir, bubblewrapBin string) error {
+func Preflight(bin, runtimeDir, bubblewrapBin, engine string) error {
+	if engine == "" {
+		engine = EngineOpenCode2
+	}
 	if bin == "" {
 		bin = "opencode2"
+		if engine == EnginePi {
+			bin = "pi"
+		}
 	}
 	paths, err := resolveSandboxRuntime(Options{
+		Engine:        engine,
 		Bin:           bin,
 		RuntimeDir:    runtimeDir,
 		BubblewrapBin: bubblewrapBin,
@@ -90,18 +100,27 @@ func Preflight(bin, runtimeDir, bubblewrapBin string) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 	}
-	for _, opencodeArgs := range [][]string{{"--version"}, {"run", "--standalone", "--help"}} {
-		files, err := newSandboxFiles(tmp, "preflight")
+	// The pi catalog probe proves the staged agent resolves the OpenCode Zen
+	// provider and the isolated credential store without a model request.
+	probes := [][]string{{"--version"}, {"run", "--standalone", "--help"}}
+	if engine == EnginePi {
+		probes = [][]string{{"--version"}, {"--list-models", "opencode"}}
+	}
+	for _, probe := range probes {
+		files, err := newSandboxFiles(tmp, "preflight", engine)
 		if err != nil {
 			return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 		}
-		cmd := exec.CommandContext(ctx, paths.bwrap, sandboxCommand(paths, checkout, files, dataDir, opencodeArgs)...)
+		cmd := exec.CommandContext(ctx, paths.bwrap, sandboxCommand(paths, checkout, files, dataDir, probe)...)
 		cmd.Dir = tmp
-		cmd.Env = sandboxEnvironment()
+		cmd.Env = sandboxEnvironment(engine)
 		cmd.ExtraFiles = []*os.File{files.config, files.auth}
 		runErr := cmd.Run()
 		files.Close()
 		if runErr != nil {
+			if engine == EnginePi {
+				return fmt.Errorf("%w: pi could not start inside Bubblewrap", ErrSandboxUnavailable)
+			}
 			return fmt.Errorf("%w: OpenCode 2 could not start inside Bubblewrap", ErrSandboxUnavailable)
 		}
 	}
@@ -112,19 +131,27 @@ func resolveSandboxRuntime(o Options) (sandboxRuntime, error) {
 	if runtime.GOOS != "linux" {
 		return sandboxRuntime{}, fmt.Errorf("%w: Bubblewrap is required on Linux", ErrSandboxUnavailable)
 	}
-	if !isOpenCode2Name(o.Bin) {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_BIN must name opencode2", ErrSandboxUnavailable)
+	engine := o.Engine
+	if engine == "" {
+		engine = EngineOpenCode2
+	}
+	root, binEnv, dirEnv := sandboxOpenCodeRoot, "OPENCODE_BIN", "OPENCODE_RUNTIME_DIR"
+	if engine == EnginePi {
+		root, binEnv, dirEnv = sandboxPiRoot, "PI_BIN", "PI_RUNTIME_DIR"
+	}
+	if !isEngineBinName(engine, o.Bin) {
+		return sandboxRuntime{}, fmt.Errorf("%w: %s must name the %s executable", ErrSandboxUnavailable, binEnv, engine)
 	}
 	if strings.TrimSpace(o.RuntimeDir) == "" {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_RUNTIME_DIR is required", ErrSandboxUnavailable)
+		return sandboxRuntime{}, fmt.Errorf("%w: %s is required", ErrSandboxUnavailable, dirEnv)
 	}
 
 	runtimeDir, err := canonicalDir(o.RuntimeDir)
 	if err != nil {
-		return sandboxRuntime{}, fmt.Errorf("%w: invalid OPENCODE_RUNTIME_DIR", ErrSandboxUnavailable)
+		return sandboxRuntime{}, fmt.Errorf("%w: invalid %s", ErrSandboxUnavailable, dirEnv)
 	}
 	if runtimeDir == string(filepath.Separator) {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_RUNTIME_DIR must not be the filesystem root", ErrSandboxUnavailable)
+		return sandboxRuntime{}, fmt.Errorf("%w: %s must not be the filesystem root", ErrSandboxUnavailable, dirEnv)
 	}
 	binaryPath := o.Bin
 	if !filepath.IsAbs(binaryPath) {
@@ -132,16 +159,16 @@ func resolveSandboxRuntime(o Options) (sandboxRuntime, error) {
 	}
 	binary, err := canonicalExecutable(binaryPath)
 	if err != nil {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_BIN is not an executable", ErrSandboxUnavailable)
+		return sandboxRuntime{}, fmt.Errorf("%w: %s is not an executable", ErrSandboxUnavailable, binEnv)
 	}
-	if !isOpenCode2Name(binary) {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_BIN must resolve to opencode2", ErrSandboxUnavailable)
+	if !isEngineBinName(engine, binary) {
+		return sandboxRuntime{}, fmt.Errorf("%w: %s must resolve to the %s executable", ErrSandboxUnavailable, binEnv, engine)
 	}
 	if !pathWithin(runtimeDir, binary) {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_BIN must be inside OPENCODE_RUNTIME_DIR", ErrSandboxUnavailable)
+		return sandboxRuntime{}, fmt.Errorf("%w: %s must be inside %s", ErrSandboxUnavailable, binEnv, dirEnv)
 	}
 	if err := validateTrustedRuntime(runtimeDir); err != nil {
-		return sandboxRuntime{}, fmt.Errorf("%w: unsafe OPENCODE_RUNTIME_DIR: %v", ErrSandboxUnavailable, err)
+		return sandboxRuntime{}, fmt.Errorf("%w: unsafe %s: %v", ErrSandboxUnavailable, dirEnv, err)
 	}
 
 	if strings.TrimSpace(o.BubblewrapBin) == "" || !filepath.IsAbs(o.BubblewrapBin) {
@@ -163,17 +190,24 @@ func resolveSandboxRuntime(o Options) (sandboxRuntime, error) {
 
 	rel, err := filepath.Rel(runtimeDir, binary)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
-		return sandboxRuntime{}, fmt.Errorf("%w: OPENCODE_BIN escapes OPENCODE_RUNTIME_DIR", ErrSandboxUnavailable)
+		return sandboxRuntime{}, fmt.Errorf("%w: %s escapes %s", ErrSandboxUnavailable, binEnv, dirEnv)
 	}
 	return sandboxRuntime{
+		engine:     engine,
 		bwrap:      bwrap,
 		runtimeDir: runtimeDir,
-		binary:     filepath.ToSlash(filepath.Join(sandboxRuntimeRoot, rel)),
+		binary:     filepath.ToSlash(filepath.Join(root, rel)),
 	}, nil
 }
 
-func isOpenCode2Name(path string) bool {
-	return strings.TrimSuffix(strings.ToLower(filepath.Base(path)), ".exe") == "opencode2"
+// isEngineBinName checks that the staged executable is named for the engine
+// so one engine's runtime cannot be swapped in for another.
+func isEngineBinName(engine, path string) bool {
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(path)), ".exe")
+	if engine == EnginePi {
+		return base == "pi"
+	}
+	return base == "opencode2"
 }
 
 func canonicalDir(path string) (string, error) {
@@ -311,10 +345,27 @@ func pathWithin(root, path string) bool {
 	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func newSandboxFiles(tmp, apiKey string) (*sandboxFiles, error) {
+func newSandboxFiles(tmp, apiKey, engine string) (*sandboxFiles, error) {
 	secretsDir := filepath.Join(tmp, "sandbox-files")
 	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
 		return nil, err
+	}
+	if engine == EnginePi {
+		// pi reads global settings and credentials from PI_CODING_AGENT_DIR:
+		// an empty trust decision plus a disabled telemetry ping. The pooled
+		// Zen key is presented as the built-in "opencode" provider credential.
+		config, err := jsonConfigFile(filepath.Join(secretsDir, "settings.json"), piSettings())
+		if err != nil {
+			return nil, err
+		}
+		auth, err := jsonConfigFile(filepath.Join(secretsDir, "auth.json"), map[string]any{
+			"opencode": map[string]string{"type": "api_key", "key": apiKey},
+		})
+		if err != nil {
+			_ = config.Close()
+			return nil, err
+		}
+		return &sandboxFiles{config: config, auth: auth}, nil
 	}
 	config, err := jsonConfigFile(filepath.Join(secretsDir, "opencode.json"), openCodeConfig())
 	if err != nil {
@@ -330,6 +381,13 @@ func newSandboxFiles(tmp, apiKey string) (*sandboxFiles, error) {
 	return &sandboxFiles{config: config, auth: auth}, nil
 }
 
+func piSettings() map[string]any {
+	return map[string]any{
+		"defaultProjectTrust":    "never",
+		"enableInstallTelemetry": false,
+	}
+}
+
 func jsonConfigFile(path string, value any) (*os.File, error) {
 	b, err := json.Marshal(value)
 	if err != nil {
@@ -341,7 +399,7 @@ func jsonConfigFile(path string, value any) (*os.File, error) {
 	return os.Open(path)
 }
 
-func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, dataDir string, opencodeArgs []string) []string {
+func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, dataDir string, agentArgs []string) []string {
 	args := []string{
 		"--die-with-parent",
 		"--unshare-user",
@@ -356,11 +414,11 @@ func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, 
 		"--share-net",
 		"--cap-drop", "ALL",
 		"--clearenv",
-		"--ro-bind", paths.runtimeDir, sandboxRuntimeRoot,
+		"--ro-bind", paths.runtimeDir, sandboxRoot(paths.engine),
 	}
-	// The OpenCode binary is dynamically linked, but it does not need broad
-	// host executable directories. /lib and /lib64 provide only its loader and
-	// shared libraries on supported Linux hosts.
+	// The reviewer executables are dynamically linked, but they do not need
+	// broad host executable directories. /lib and /lib64 provide only the
+	// loader and shared libraries on supported Linux hosts.
 	for _, path := range []string{"/lib", "/lib64"} {
 		if _, err := os.Lstat(path); err == nil {
 			args = append(args, "--ro-bind", path, path)
@@ -396,14 +454,34 @@ func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, 
 		"--dir", "/home/reviewer",
 		"--size", sandboxConfigTmpfsSize,
 		"--tmpfs", "/xdg-config",
-		"--dir", "/xdg-config/opencode",
-		"--ro-bind-data", fmt.Sprint(configFD), "/xdg-config/opencode/opencode.json",
-		// The current beta cannot create its session database on a tmpfs
-		// /xdg-data (Session.create fails); bind a per-run host directory
-		// with the same lifetime instead. It carries no cross-run state.
-		"--bind", dataDir, "/xdg-data",
-		"--dir", "/xdg-data/opencode",
-		"--ro-bind-data", fmt.Sprint(authFD), "/xdg-data/opencode/auth.json",
+	)
+	if paths.engine == EnginePi {
+		// pi reads PI_CODING_AGENT_DIR: a writable tmpfs holding only the
+		// per-run settings and credential files passed as read-only FDs. The
+		// tmpfs must stay writable because pi caches its provider catalog.
+		args = append(args,
+			"--size", sandboxConfigTmpfsSize,
+			"--tmpfs", sandboxPiConfig,
+			"--ro-bind-data", fmt.Sprint(configFD), sandboxPiConfig+"/settings.json",
+			"--ro-bind-data", fmt.Sprint(authFD), sandboxPiConfig+"/auth.json",
+			// pi persists no sessions (--no-session) and needs no host data
+			// directory, so /xdg-data stays an isolated tmpfs.
+			"--size", sandboxStateTmpfsSize,
+			"--tmpfs", "/xdg-data",
+		)
+	} else {
+		args = append(args,
+			"--dir", "/xdg-config/opencode",
+			"--ro-bind-data", fmt.Sprint(configFD), "/xdg-config/opencode/opencode.json",
+			// The current beta cannot create its session database on a tmpfs
+			// /xdg-data (Session.create fails); bind a per-run host directory
+			// with the same lifetime instead. It carries no cross-run state.
+			"--bind", dataDir, "/xdg-data",
+			"--dir", "/xdg-data/opencode",
+			"--ro-bind-data", fmt.Sprint(authFD), "/xdg-data/opencode/auth.json",
+		)
+	}
+	args = append(args,
 		"--size", sandboxCacheTmpfsSize,
 		"--tmpfs", "/xdg-cache",
 		"--size", sandboxStateTmpfsSize,
@@ -420,27 +498,30 @@ func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, 
 		"--proc", "/proc",
 		"--dev", "/dev",
 	)
-	for _, entry := range sandboxEnvironment() {
+	for _, entry := range sandboxEnvironment(paths.engine) {
 		key, value, _ := strings.Cut(entry, "=")
 		args = append(args, "--setenv", key, value)
 	}
 	args = append(args, "--chdir", sandboxWorkspace, "--", paths.binary)
-	return append(args, opencodeArgs...)
+	return append(args, agentArgs...)
 }
 
-func sandboxEnvironment() []string {
-	return []string{
-		"PATH=" + sandboxRuntimeRoot + "/bin:/usr/bin:/bin",
+func sandboxRoot(engine string) string {
+	if engine == EnginePi {
+		return sandboxPiRoot
+	}
+	return sandboxOpenCodeRoot
+}
+
+func sandboxEnvironment(engine string) []string {
+	env := []string{
+		"PATH=" + sandboxRoot(engine) + "/bin:/usr/bin:/bin",
 		"HOME=/home/reviewer",
 		"XDG_CONFIG_HOME=/xdg-config",
 		"XDG_DATA_HOME=/xdg-data",
 		"XDG_CACHE_HOME=/xdg-cache",
 		"XDG_STATE_HOME=/xdg-state",
 		"XDG_RUNTIME_DIR=/run/user/0",
-		"OPENCODE_CONFIG=/xdg-config/opencode/opencode.json",
-		"OPENCODE_CONFIG_DIR=/xdg-config/opencode",
-		"OPENCODE_DISABLE_PROJECT_CONFIG=1",
-		"OPENCODE_CONFIG_PROJECT_DISABLE=1",
 		"CI=1",
 		"NO_COLOR=1",
 		"TERM=dumb",
@@ -448,4 +529,21 @@ func sandboxEnvironment() []string {
 		"LANG=C",
 		"TMPDIR=/tmp",
 	}
+	if engine == EnginePi {
+		// The pooled key is never exposed through the child environment; it
+		// arrives only through the isolated auth.json. Offline flags stop
+		// update checks and telemetry so a review only talks to Zen.
+		return append(env,
+			"PI_CODING_AGENT_DIR="+sandboxPiConfig,
+			"PI_OFFLINE=1",
+			"PI_SKIP_VERSION_CHECK=1",
+			"PI_TELEMETRY=0",
+		)
+	}
+	return append(env,
+		"OPENCODE_CONFIG=/xdg-config/opencode/opencode.json",
+		"OPENCODE_CONFIG_DIR=/xdg-config/opencode",
+		"OPENCODE_DISABLE_PROJECT_CONFIG=1",
+		"OPENCODE_CONFIG_PROJECT_DISABLE=1",
+	)
 }

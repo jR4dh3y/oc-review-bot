@@ -40,10 +40,11 @@ OpenCode 2 beta CLI, rather than assuming a Docker image or a particular PaaS in
    `GITHUB_APP_PRIVATE_KEY_PATH` should be readable only by the service account.
 5. Set every required variable in the [configuration table](../README.md#configuration): GitHub App
    credentials, `SESSION_SECRET`, `ADMIN_GITHUB_IDS`, both GitHub target allowlists,
-   `ZEN_DEFAULT_MODEL`, `OPENCODE_RUNTIME_DIR`, and `BUBBLEWRAP_BIN`. Configure both OAuth values
-   as well: startup permits them to be absent, but users cannot register or log in without them.
-   Select a model that is currently enabled for the deployed OpenCode/Zen configuration; model
-   catalogs change, so do not rely on a historical README example. Do not set
+   `ZEN_DEFAULT_MODEL`, the active engine's runtime dir (`OPENCODE_RUNTIME_DIR` for the default
+   `opencode2` engine, `PI_RUNTIME_DIR` when `REVIEW_ENGINE=pi`), and `BUBBLEWRAP_BIN`. Configure
+   both OAuth values as well: startup permits them to be absent, but users cannot register or log
+   in without them. Select a model that is currently enabled for the deployed OpenCode/Zen
+   configuration; model catalogs change, so do not rely on a historical README example. Do not set
    `ADMIN_GITHUB_LOGINS`; a non-empty legacy login allowlist is explicitly rejected.
 
 ## Runtime configuration
@@ -58,6 +59,33 @@ The application always runs OpenCode 2 in standalone mode. `OPENCODE_BIN` must h
 be inside that directory. `OPENCODE_RUNTIME_DIR` and `BUBBLEWRAP_BIN` are required configuration
 values, not optional tuning knobs. Configuration loading detects missing paths; individual reviews
 also verify the runtime tree and Bubblewrap capability before executing untrusted PR content.
+
+### Reviewer engine selection
+
+`REVIEW_ENGINE` selects the reviewer agent and its separate configuration; the default remains
+`opencode2`. Setting `REVIEW_ENGINE=pi` activates the pi coding agent:
+
+- `PI_BIN` (default `pi`) must have the basename `pi` and resolve inside `PI_RUNTIME_DIR`, exactly
+  like the OpenCode contract. `PI_RUNTIME_DIR` is required for this engine; `OPENCODE_RUNTIME_DIR`
+  is then not required and is never consulted, so both trees can stay staged side by side and the
+  engine can be switched with one variable.
+- The pi runtime tree satisfies the same read-only trust rules (no symlinked, group-writable, or
+  world-writable entries). Because pi is a Node CLI, stage the `node` executable inside the tree
+  and give `bin/pi` an absolute shebang such as `#!/opt/pi-runtime/bin/node`; the sandbox has no
+  host `/usr/bin/env`. See the README's pi staging recipe.
+- Startup preflight runs `pi --version` and `pi --list-models opencode` inside the same Bubblewrap
+  profile used for reviews. The catalog probe proves the staged agent resolves the built-in
+  `opencode` (Zen) provider from the isolated credential store without calling a model.
+- Each pi review runs `pi --print` with a fixed, non-configurable flag set: model from the shared
+  `provider/model` setting, a read-only tool allowlist (`read`, `grep`, `find`, `ls`), all
+  project-local discovery disabled (extensions, skills, prompt templates, themes, context files,
+  project trust), no session persistence, and a safety system-prompt appendix. The pooled Zen key
+  is written to an isolated `auth.json` (`{"opencode":{"type":"api_key", ...}}`) under a per-run
+  `PI_CODING_AGENT_DIR` tmpfs and is never passed through the child environment. Startup
+  network noise (update checks, telemetry) is disabled with `PI_OFFLINE`, `PI_SKIP_VERSION_CHECK`,
+  and `PI_TELEMETRY=0`; only model traffic to Zen remains.
+- pi terminal execution failures surface in the dashboard and logs with the `pi_execution` cause
+  instead of `opencode_execution`; quota/rate-limit handling and key cooldown are identical.
 
 Set the immutable numeric access boundary before accepting webhook traffic. `ADMIN_GITHUB_IDS` is
 the authoritative dashboard-admin and review-requester allowlist; `REVIEWER_GITHUB_IDS` grants
@@ -142,10 +170,11 @@ same review event from creating an unsafe duplicate.
 
 ## Zen key-pool governance
 
-OpenCode Zen is a paid, usage-based provider. Add API keys only from accounts that are authorized
-to share the same workload, budget, and data-access boundary. The dashboard's per-key request
-counter is an operational scheduling metric; it is not a provider billing record or a way to bypass
-provider controls.
+OpenCode Zen is a usage-based provider that also lists rate-limited free models (IDs ending in
+`-free`); free models still consume the pooled keys' request quota and rate limits. Add API keys
+only from accounts that are authorized to share the same workload, budget, and data-access
+boundary. The dashboard's per-key request counter is an operational scheduling metric; it is not a
+provider billing record or a way to bypass provider controls.
 
 On a recognized Zen quota, credit, or rate-limit response, the service puts that key on cooldown
 for `ZEN_COOLDOWN_MINUTES` and can make one retry with another eligible key. Do not use multiple

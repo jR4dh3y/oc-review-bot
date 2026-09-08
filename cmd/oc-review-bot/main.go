@@ -38,8 +38,9 @@ func run() error {
 		return err
 	}
 	log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
-	if err := runner.Preflight(cfg.OpenCodeBin, cfg.OpenCodeRuntimeDir, cfg.BubblewrapBin); err != nil {
-		log.Error("review sandbox preflight", "err", err)
+	engine, bin, runtimeDir := cfg.AgentRuntime()
+	if err := runner.Preflight(bin, runtimeDir, cfg.BubblewrapBin, engine); err != nil {
+		log.Error("review sandbox preflight", "engine", engine, "err", err)
 		return err
 	}
 
