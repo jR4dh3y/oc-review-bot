@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,6 +126,30 @@ func TestSandboxCommandBindsHostDataDir(t *testing.T) {
 	}
 }
 
+func TestArchiveClientRetriesTransient(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`ok`))
+	}))
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := githubArchiveHTTPClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != 3 {
+		t.Fatalf("status = %d after %d calls, want 200 after 3", resp.StatusCode, calls)
+	}
+}
 func TestExtractTextPlainFallback(t *testing.T) {
 	plain := "just text, no json"
 	if got := ExtractText(plain); got != plain {

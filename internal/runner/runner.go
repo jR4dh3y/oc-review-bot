@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,7 +24,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
+
+import "github.com/jR4dh3y/oc-review-bot/internal/gh"
 
 // ErrQuota marks failures caused by the API key's quota or rate limit, which
 // should send the key into cooldown.
@@ -338,10 +342,14 @@ type archiveHTTPClient interface {
 }
 
 var githubArchiveHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		Proxy:              http.ProxyFromEnvironment,
-		DisableCompression: true,
-	},
+	Transport: gh.RetryTransport(&http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DisableCompression:    true,
+		DisableKeepAlives:     true,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	}),
 	// Each redirect is checked against the exact codeload archive URL before a
 	// separate unauthenticated request is issued.
 	CheckRedirect: func(*http.Request, []*http.Request) error {

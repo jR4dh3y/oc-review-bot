@@ -107,9 +107,107 @@ func NewApp(appID, privateKeyPEM, webhookSecret string, botGitHubID int64) (*App
 		secret: webhookSecret,
 		botID:  botGitHubID,
 		base:   apiBase(),
-		http:   &http.Client{Timeout: 30 * time.Second},
+		http:   newGitHubHTTPClient(),
 		tokens: map[installationTokenKey]installationToken{},
 	}, nil
+}
+
+// newGitHubHTTPClient dials fresh for every call. Keep-alive reuse hangs to
+// the full timeout behind middleboxes that blackhole idle connections;
+// this client is low-volume, so the extra handshakes are negligible.
+func newGitHubHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: RetryTransport(&http.Transport{
+			DisableKeepAlives:     true,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 25 * time.Second,
+		}),
+	}
+}
+
+// retryDelays spaces in-call retries of transient GitHub failures so a
+// single stalled request does not fail the whole review attempt.
+var retryDelays = []time.Duration{time.Second, 3 * time.Second}
+
+// RetryTransport wraps base with bounded retries of requests that are safe
+// to resend: idempotent reads, scoped token mints (minting twice only leaves
+// an unused token), and reaction writes (GitHub deduplicates identical
+// reactions). Comment writes are deliberately single-shot: resending a lost
+// summary could publish it twice.
+func RetryTransport(base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &retryTransport{base: base}
+}
+
+type retryTransport struct {
+	base http.RoundTripper
+}
+
+func retryableRequest(req *http.Request) bool {
+	if req.Method == http.MethodGet {
+		return true
+	}
+	if req.Method != http.MethodPost {
+		return false
+	}
+	return strings.HasSuffix(req.URL.Path, "/access_tokens") ||
+		strings.HasSuffix(req.URL.Path, "/reactions")
+}
+
+func retryableStatus(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusRequestTimeout ||
+		resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode >= 500 {
+		return true
+	}
+	return resp.StatusCode == http.StatusForbidden &&
+		(resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != "")
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	hasBody := req.Body != nil && req.Body != http.NoBody
+	var resp *http.Response
+	var err error
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 && hasBody {
+			if req.GetBody == nil {
+				break
+			}
+			var body io.ReadCloser
+			body, err = req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			req.Body = body
+		}
+		resp, err = t.base.RoundTrip(req)
+		retry := err == nil && retryableStatus(resp)
+		if err != nil {
+			retry = IsRetryable(err)
+		}
+		if !retry || !retryableRequest(req) || attempt >= len(retryDelays) {
+			break
+		}
+		if resp != nil && resp.Body != nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+		}
+		timer := time.NewTimer(retryDelays[attempt])
+		select {
+		case <-req.Context().Done():
+			timer.Stop()
+			return nil, req.Context().Err()
+		case <-timer.C:
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // apiBase returns the GitHub API base URL, overridable via GITHUB_API_BASE

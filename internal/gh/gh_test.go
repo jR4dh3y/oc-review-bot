@@ -39,6 +39,85 @@ func signBody(t *testing.T, secret, body string) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func TestRetryTransportRetriesTransientGET(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: RetryTransport(nil)}
+	resp, err := client.Get(srv.URL + "/repos/o/r/pulls/7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != 3 {
+		t.Fatalf("status = %d after %d calls, want 200 after 3", resp.StatusCode, calls)
+	}
+}
+
+func TestRetryTransportSendsCommentPostOnce(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: RetryTransport(nil)}
+	resp, err := client.Post(srv.URL+"/repos/o/r/issues/7/comments", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if calls != 1 {
+		t.Fatalf("comment POST attempted %d times, want exactly 1", calls)
+	}
+}
+
+func TestRetryTransportRetriesTokenPost(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Transport: RetryTransport(nil)}
+	resp, err := client.Post(srv.URL+"/app/installations/1/access_tokens", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != 2 {
+		t.Fatalf("status = %d after %d calls, want 200 after 2", resp.StatusCode, calls)
+	}
+}
+
+func TestGitHubClientAvoidsKeepAliveReuse(t *testing.T) {
+	rt, ok := newGitHubHTTPClient().Transport.(*retryTransport)
+	if !ok {
+		t.Fatalf("transport = %T, want *retryTransport", newGitHubHTTPClient().Transport)
+	}
+	tr, ok := rt.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("inner transport = %T, want *http.Transport", rt.base)
+	}
+	if !tr.DisableKeepAlives {
+		t.Fatal("keep-alive reuse hangs to the client timeout behind blackholing middleboxes")
+	}
+	if tr.ResponseHeaderTimeout <= 0 || tr.TLSHandshakeTimeout <= 0 {
+		t.Fatal("handshake/header timeouts must bound every call")
+	}
+}
+
 func TestVerifySignature(t *testing.T) {
 	a := testApp(t, http.NotFoundHandler())
 	body := `{"action":"created"}`
