@@ -525,6 +525,19 @@ func TestRunRefusesDirectExecutionWhenSandboxIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestRunMapsAbortedStreamToRetryableError(t *testing.T) {
+	requireBubblewrap(t)
+	remote, head := initRemote(t, nil)
+	bin, runtimeDir := fakeRuntime(t, `
+printf '%s\n' '{"type":"error","error":{"type":"aborted","message":"Step interrupted"}}'
+exit 1
+`)
+	_, err := Run(context.Background(), runOptions(bin, runtimeDir, remote, head))
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("error = %v, want ErrAborted", err)
+	}
+}
+
 func TestRunFailsOnQuotaError(t *testing.T) {
 	requireBubblewrap(t)
 	remote, head := initRemote(t, nil)

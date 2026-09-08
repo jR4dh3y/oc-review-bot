@@ -37,6 +37,16 @@ var ErrQuota = errors.New("zen quota or rate limit hit")
 // output, which can contain hostile repository content or provider secrets.
 var ErrExecution = errors.New("opencode review execution failed")
 
+// ErrAborted marks a reviewer run the provider cut off mid-stream (for
+// example a dropped event stream). Nothing was published, so a bounded
+// rerun is safe; only cost accrues, capped by the attempt loop.
+var ErrAborted = errors.New("opencode review aborted mid-stream")
+
+// abortedOutputMarker identifies the CLI's abort report inside its JSONL
+// output. It is matched literally: the reviewed diff travels attached, not
+// in stdout, so model output echoing this exact marker is not expected.
+const abortedOutputMarker = `"type":"aborted"`
+
 // AgentFailure attaches a bounded, sanitized diagnostic excerpt to an
 // execution failure. Error prints only the sentinel, so the excerpt surfaces
 // only where the engine deliberately logs it; it must never be persisted.
@@ -253,6 +263,9 @@ func Run(ctx context.Context, o Options) (string, error) {
 		if err != nil {
 			if isQuotaError(stderr.String()) {
 				return "", ErrQuota
+			}
+			if strings.Contains(stdout.String(), abortedOutputMarker) {
+				return "", &AgentFailure{Err: ErrAborted, Diagnostic: agentFailureDetail(stderr.String(), stdout.String())}
 			}
 			return "", &AgentFailure{Err: ErrExecution, Diagnostic: agentFailureDetail(stderr.String(), stdout.String())}
 		}

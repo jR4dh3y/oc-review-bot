@@ -1132,7 +1132,7 @@ func (e *Engine) signalReviewFailure(ctx context.Context, token string, r *store
 
 func isRetryableReviewError(err error) bool {
 	return gh.IsRetryable(err) || errors.Is(err, pool.ErrEmpty) || errors.Is(err, runner.ErrQuota) ||
-		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, store.ErrReviewNotReady) ||
+		errors.Is(err, runner.ErrAborted) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, store.ErrReviewNotReady) ||
 		errors.Is(err, errPublicationInFlight)
 }
 
@@ -1144,6 +1144,8 @@ func reviewErrorClass(err error) string {
 		return "checkout_rejected"
 	case errors.Is(err, runner.ErrQuota):
 		return "provider_quota"
+	case errors.Is(err, runner.ErrAborted):
+		return "model_aborted"
 	case errors.Is(err, runner.ErrExecution):
 		return "opencode_execution"
 	case errors.Is(err, runner.ErrHeadChanged):
