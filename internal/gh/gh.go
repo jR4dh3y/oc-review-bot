@@ -128,8 +128,10 @@ func newGitHubHTTPClient() *http.Client {
 }
 
 // retryDelays spaces in-call retries of transient GitHub failures so a
-// single stalled request does not fail the whole review attempt.
-var retryDelays = []time.Duration{time.Second, 3 * time.Second}
+// single stalled call does not fail the whole review attempt. The horizon
+// covers minute-long uplink blackouts; longer outages surface through the
+// attempt-level retry loop instead.
+var retryDelays = []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second}
 
 // RetryTransport wraps base with bounded retries of requests that are safe
 // to resend: idempotent reads, scoped token mints (minting twice only leaves
