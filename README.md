@@ -31,9 +31,17 @@ serves everything.
 3. Parse the agent's final message: last fenced JSON block `{summary, sequence_diagram, findings:[{path,
    line, side, severity, body}]}` (tolerant — plain text gets a safe fallback diagram) → map findings
    to diff lines via the PR file list (skip findings outside the diff) → post the summary with its
-   Mermaid diagram first, then inline review comments → react 🚀/❌ → record per-key usage. A
+   Mermaid diagram first, then inline review comments → react 🚀 on success, or react 👎 and record a
+   failure cause on terminal failure → record per-key usage. A
    402/429/quota failure cools that key for `ZEN_COOLDOWN_MINUTES` and may retry once with another
    eligible, authorized key.
+
+Terminal failures mark the review `failed` in the dashboard with an operator-safe cause (for example
+`opencode_execution`, `sandbox_unavailable`, `github_http_404`) so the PR's review slot is released
+and the requester can mention the bot again. The service log gains the cause plus, for agent and
+sandbox failures, a bounded sanitized excerpt of the reviewer's stderr; set `LOG_LEVEL=debug` for
+engine-internal detail. Shutdown interruptions are not failures: those rows are requeued durably by
+the next startup.
 
 ## Local setup
 
@@ -157,6 +165,7 @@ commenters get a register-here reply.
 | `OPENCODE_BIN` | no | `opencode2` | Must name an OpenCode 2 `opencode2` executable; an absolute path must be inside the runtime directory |
 | `OPENCODE_RUNTIME_DIR` | yes | — | Absolute trusted runtime root; the default binary is `$OPENCODE_RUNTIME_DIR/bin/opencode2` |
 | `BUBBLEWRAP_BIN` | yes | — | Bubblewrap executable path or command resolving to a trusted executable |
+| `LOG_LEVEL` | no | `info` | Service log level: `debug`, `info`, `warn`, or `error` |
 
 GitHub ID lists accept positive decimal IDs separated by commas (whitespace is allowed); duplicates
 and login names are rejected. Obtain the numeric `id` values from GitHub API responses or webhook
@@ -208,4 +217,4 @@ All JSON, session cookie `oc_review_session`:
   build, and a production binary build.
 - A live review can incur OpenCode Zen charges. Use an authorized funded test key, add it at
   `/admin/keys`, comment `@oc-review-bot` on a test PR, and watch `/dashboard` go queued →
-  running → done.
+  running → done (or failed, with the cause on the review detail page).

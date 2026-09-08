@@ -27,6 +27,8 @@ const (
 	reviewFailureMessage       = "The review could not be completed safely. Please mention the bot again to retry."
 	headChangedMessage         = "The pull request changed before the review could complete. Mention the bot again to review the latest revision."
 	reviewAccessRevokedMessage = "Review access was removed before this queued request could run."
+	invalidModelMessage        = "The configured review model is no longer valid. An administrator must update it in the dashboard before retrying."
+	failureReaction            = "-1"
 
 	queuePollInterval   = time.Second
 	transientRetryDelay = 15 * time.Second
@@ -566,7 +568,9 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	log := e.log.With("review", r.ID, "repo", r.RepoFull, "pr", r.PRNumber)
 	if !e.cfg.CanRequestReview(r.RequesterGitHubID, r.InstallationID, r.RepositoryID) {
-		e.failReview(r, log, reviewAccessRevokedMessage)
+		if e.failReview(r, log, reviewAccessRevokedMessage) {
+			e.signalReviewFailure(ctx, "", r, log)
+		}
 		return
 	}
 
@@ -575,7 +579,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	token, err := e.app.InstallationToken(ctx, r.InstallationID, r.RepositoryID)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
@@ -583,18 +587,18 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	currentPR, err := e.app.GetPR(ctx, token, r.RepoFull, r.PRNumber)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	verifiedRepo, err := verifyPRTarget(r.RepositoryID, r.PRNumber, currentPR)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	r.RepoFull = verifiedRepo
 	currentRevision := currentPR.RevisionToken()
 	if currentRevision == "" {
-		e.handleReviewError(r, log, errReviewRevision)
+		e.handleReviewError(ctx, token, r, log, errReviewRevision)
 		return
 	}
 	if r.PublicationPrepared {
@@ -608,7 +612,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 	if err := e.st.SetReviewRevision(r.ID, r.ExecutionGeneration, verifiedRepo, currentPR.Head.SHA, currentRevision, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	r.HeadSHA = currentPR.Head.SHA
@@ -617,12 +621,12 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 	if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		if !errors.Is(err, store.ErrReviewLeaseLost) {
-			e.handleReviewError(r, log, err)
+			e.handleReviewError(ctx, token, r, log, err)
 		}
 		return
 	}
@@ -637,7 +641,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 			if errors.Is(err, runner.ErrHeadChanged) {
 				e.handlePreparedHeadChanged(ctx, token, r, log)
 			} else {
-				e.handleReviewError(r, log, err)
+				e.handleReviewError(ctx, token, r, log, err)
 			}
 			return
 		}
@@ -645,7 +649,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 			return
 		}
 		if err := e.publishPrepared(ctx, token, r); err != nil {
-			e.handleReviewError(r, log, err)
+			e.handleReviewError(ctx, token, r, log, err)
 			return
 		}
 		e.finishPublishedReview(ctx, token, r, log)
@@ -656,35 +660,37 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 	if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	files, err := e.app.ListFiles(ctx, token, r.RepoFull, r.PRNumber)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if _, err := e.ensureCurrentRevision(ctx, token, r); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	diff, err := e.app.GetDiff(ctx, token, r.RepoFull, r.PRNumber)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 
 	model := e.st.GetSetting("model", e.cfg.DefaultModel)
 	if !config.ValidModel(model) {
-		e.failReview(r, log, reviewFailureMessage)
+		if e.failReview(r, log, invalidModelMessage) {
+			e.signalReviewFailure(ctx, token, r, log)
+		}
 		return
 	}
 	_, agentOut, err := e.runWithPool(ctx, token, r, model, diff, log)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 
@@ -695,12 +701,12 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	currentPR, err = e.app.GetPR(ctx, token, r.RepoFull, r.PRNumber)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	verifiedRepo, err = verifyPRTarget(r.RepositoryID, r.PRNumber, currentPR)
 	if err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	r.RepoFull = verifiedRepo
@@ -713,14 +719,14 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		return
 	}
 	if err := e.preparePublication(r, currentPR, review.NewDiffIndex(files), review.ExtractReview(agentOut)); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
 	if err := e.publishPrepared(ctx, token, r); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	e.finishPublishedReview(ctx, token, r, log)
@@ -1027,7 +1033,7 @@ func (e *Engine) finishPublishedReview(ctx context.Context, token string, r *sto
 	log.Info("review finished")
 }
 
-func (e *Engine) handleReviewError(r *store.Review, log *slog.Logger, err error) {
+func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.Review, log *slog.Logger, err error) {
 	if !e.serviceLeaseOwned() {
 		log.Info("service lease lost before review update")
 		return
@@ -1051,7 +1057,9 @@ func (e *Engine) handleReviewError(r *store.Review, log *slog.Logger, err error)
 		return
 	}
 	if errors.Is(err, errReviewAccess) {
-		e.failReview(r, log, reviewAccessRevokedMessage)
+		if e.failReview(r, log, reviewAccessRevokedMessage) {
+			e.signalReviewFailure(ctx, token, r, log)
+		}
 		return
 	}
 	if isRetryableReviewError(err) && r.ExecutionGeneration < maxDeliveryAttempts {
@@ -1074,15 +1082,52 @@ func (e *Engine) handleReviewError(r *store.Review, log *slog.Logger, err error)
 		e.signal()
 		return
 	}
-	// Terminal failures log only the error class: the underlying error can
-	// carry hostile repository content or provider secrets. The endpoint and
-	// status of GitHub HTTP failures are operator-owned request data.
+	// A cancelled worker context means shutdown or worker replacement, not a
+	// review defect. Leave the durable running row alone: startup recovery
+	// requeues it instead of failing the requester's review on every deploy.
+	if errors.Is(err, context.Canceled) {
+		log.Info("review interrupted; durable recovery will requeue it", "cause", reviewErrorClass(err))
+		return
+	}
+	// Terminal failure: record the outcome so the dashboard and the PR's
+	// active-review slot are released. Only the operator-owned error class is
+	// stored; the underlying error can carry hostile repository content or
+	// provider secrets. The sanitized runner diagnostic and GitHub endpoint
+	// and status are safe for the service log.
 	attrs := []any{"cause", reviewErrorClass(err)}
+	if detail := runner.Diagnostic(err); detail != "" {
+		attrs = append(attrs, "detail", detail)
+	}
 	var httpErr *gh.HTTPError
 	if errors.As(err, &httpErr) {
 		attrs = append(attrs, "github_status", httpErr.StatusCode, "github_endpoint", httpErr.Method+" "+httpErr.Path)
 	}
-	log.Warn("review failed", attrs...)
+	log.Error("review failed", attrs...)
+	if e.failReview(r, log, fmt.Sprintf("%s (cause: %s)", reviewFailureMessage, reviewErrorClass(err))) {
+		e.signalReviewFailure(ctx, token, r, log)
+	}
+}
+
+// signalReviewFailure best-effort reacts to the trigger comment so the
+// requester can see the review stopped, mirroring the success reaction.
+func (e *Engine) signalReviewFailure(ctx context.Context, token string, r *store.Review, log *slog.Logger) {
+	if e.app == nil || r == nil || r.TriggerCommentID < 1 {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if token == "" {
+		acquired, err := e.app.InstallationToken(ctx, r.InstallationID, r.RepositoryID)
+		if err != nil {
+			log.Debug("skip failure reaction", "cause", "installation token unavailable")
+			return
+		}
+		token = acquired
+	}
+	if err := e.app.ReactToIssueComment(ctx, token, r.RepoFull, r.TriggerCommentID, failureReaction); err != nil {
+		log.Warn("acknowledge failed review", "cause", "github")
+	}
 }
 
 func isRetryableReviewError(err error) bool {
@@ -1093,6 +1138,10 @@ func isRetryableReviewError(err error) bool {
 
 func reviewErrorClass(err error) string {
 	switch {
+	case errors.Is(err, runner.ErrCheckoutTooLarge):
+		return "checkout_too_large"
+	case errors.Is(err, runner.ErrCheckoutRejected):
+		return "checkout_rejected"
 	case errors.Is(err, runner.ErrQuota):
 		return "provider_quota"
 	case errors.Is(err, runner.ErrExecution):
@@ -1147,7 +1196,7 @@ func uncertainDeliveryStatus(status string) bool {
 // sending publication or let a replacement review race an unknown comment.
 func (e *Engine) handlePreparedHeadChanged(ctx context.Context, token string, r *store.Review, log *slog.Logger) {
 	if err := e.reconcilePreparedPublications(ctx, token, r); err != nil {
-		e.handleReviewError(r, log, err)
+		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
 	e.failHeadChanged(r, log)
@@ -1221,18 +1270,22 @@ func (e *Engine) reviewCompletionSideEffectError(ctx context.Context, r *store.R
 	return nil
 }
 
-func (e *Engine) failReview(r *store.Review, log *slog.Logger, message string) {
+// failReview records the terminal failure for the current execution
+// generation and reports whether this worker's update landed.
+func (e *Engine) failReview(r *store.Review, log *slog.Logger, message string) bool {
 	if !e.serviceLeaseOwned() {
 		log.Info("service lease lost before failure update")
-		return
+		return false
 	}
 	if err := e.st.FinishReviewFailed(r.ID, r.ExecutionGeneration, message, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
 		if errors.Is(err, store.ErrReviewLeaseLost) {
 			log.Info("review lease lost before failure update")
-			return
+			return false
 		}
 		log.Error("mark review failed", "err", err)
+		return false
 	}
+	return true
 }
 
 func (e *Engine) processClaimedNudge(ctx context.Context, n *store.Nudge) {

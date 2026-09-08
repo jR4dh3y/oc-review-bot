@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -41,6 +42,7 @@ type Config struct {
 	OpenCodeRuntimeDir  string
 	BubblewrapBin       string
 	OpenCodeArgs        []string // flags passed after `opencode2 run`
+	LogLevel            slog.Level
 }
 
 // Load reads env vars and returns the config. It returns an error when a
@@ -92,6 +94,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.MaxActiveReviews, err = envInt("MAX_ACTIVE_REVIEWS", 50); err != nil {
+		return nil, err
+	}
+	if c.LogLevel, err = envLogLevel("LOG_LEVEL"); err != nil {
 		return nil, err
 	}
 
@@ -363,6 +368,24 @@ func envBool(key string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("%s must be true or false", key)
 	}
 	return b, nil
+}
+
+func envLogLevel(key string) (slog.Level, error) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return slog.LevelInfo, nil
+	}
+	switch v {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	}
+	return 0, fmt.Errorf("%s must be debug, info, warn, or error", key)
 }
 
 func mustURLHost(raw string) string {
