@@ -1,17 +1,21 @@
 package runner
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +154,72 @@ func TestArchiveClientRetriesTransient(t *testing.T) {
 		t.Fatalf("status = %d after %d calls, want 200 after 3", resp.StatusCode, calls)
 	}
 }
+
+type flakyArchiveClient struct {
+	calls   int
+	tarball []byte
+	sha     string
+}
+
+func (f *flakyArchiveClient) Do(req *http.Request) (*http.Response, error) {
+	f.calls++
+	header := http.Header{}
+	if strings.Contains(req.URL.Host, "api.github.com") {
+		header.Set("Location", "https://codeload.github.com/o/r/legacy.tar.gz/"+f.sha)
+		return &http.Response{StatusCode: http.StatusFound, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+	}
+	body := []byte("truncated!")
+	if f.calls >= 6 {
+		body = f.tarball
+	}
+	header.Set("Content-Type", "application/x-gzip")
+	header.Set("Content-Length", strconv.Itoa(len(body)))
+	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: req}, nil
+}
+
+func testTarball(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "r-aaa/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("hello")
+	if err := tw.WriteHeader(&tar.Header{Name: "r-aaa/f.txt", Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestCheckoutRefetchesCorruptArchive(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	client := &flakyArchiveClient{tarball: testTarball(t), sha: sha}
+	dest := filepath.Join(t.TempDir(), "checkout")
+	if err := checkoutGitHubArchive(context.Background(), dest, "o", "r", sha, "token", client); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("extracted = %q, want %q", got, "hello")
+	}
+	if client.calls != 6 {
+		t.Fatalf("archive calls = %d, want 6 (redirect + corrupt body, twice, then success)", client.calls)
+	}
+}
+
 func TestExtractTextPlainFallback(t *testing.T) {
 	plain := "just text, no json"
 	if got := ExtractText(plain); got != plain {

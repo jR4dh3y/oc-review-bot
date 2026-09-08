@@ -411,6 +411,7 @@ type archiveHTTPClient interface {
 }
 
 var githubArchiveHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute,
 	Transport: gh.RetryTransport(&http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DisableCompression:    true,
@@ -426,7 +427,40 @@ var githubArchiveHTTPClient = &http.Client{
 	},
 }
 
+// checkoutAttempts bounds whole-archive refetches: a stalled or truncated
+// download fails mid-extract with no usable partial tree, so the only
+// recovery is downloading again into a cleaned destination.
+const checkoutAttempts = 3
+
+var checkoutRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second}
+
 func checkoutGitHubArchive(ctx context.Context, destination, owner, repository, sha, token string, client archiveHTTPClient) error {
+	var err error
+	for attempt := range checkoutAttempts {
+		if attempt > 0 {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			timer := time.NewTimer(checkoutRetryDelays[attempt-1])
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			_ = os.RemoveAll(destination)
+		}
+		if err = checkoutGitHubArchiveOnce(ctx, destination, owner, repository, sha, token, client); err == nil {
+			return nil
+		}
+		if errors.Is(err, ErrCheckoutTooLarge) {
+			return err
+		}
+	}
+	return err
+}
+
+func checkoutGitHubArchiveOnce(ctx context.Context, destination, owner, repository, sha, token string, client archiveHTTPClient) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, githubArchiveAPIURL(owner, repository, sha), nil)
 	if err != nil {
 		return ErrCheckoutRejected
