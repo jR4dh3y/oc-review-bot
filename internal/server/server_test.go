@@ -845,3 +845,32 @@ func TestReviewsAreScopedToRequesterUnlessAdmin(t *testing.T) {
 		t.Fatalf("admin foreign detail code = %d", rec.Code)
 	}
 }
+func TestFindingJSONDoesNotExposeExecutionState(t *testing.T) {
+	encoded, err := json.Marshal(toFindingJSON(store.Finding{
+		ID:                1,
+		ReviewID:          2,
+		Path:              "internal/example.go",
+		Line:              9,
+		Side:              "RIGHT",
+		Severity:          "warning",
+		BodyMD:            "finding",
+		PostedCommentID:   3,
+		ServiceLeaseOwner: "private-worker-token",
+		ServiceLeaseFence: 7,
+		SendingStartedAt:  time.Now().UTC(),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(encoded)
+	for _, internalField := range []string{"ServiceLeaseOwner", "ServiceLeaseFence", "SendingStartedAt", "private-worker-token"} {
+		if strings.Contains(body, internalField) {
+			t.Fatalf("finding response exposes %q: %s", internalField, body)
+		}
+	}
+	for _, publicField := range []string{`"id":1`, `"review_id":2`, `"path":"internal/example.go"`, `"body":"finding"`, `"posted_comment_id":3`} {
+		if !strings.Contains(body, publicField) {
+			t.Fatalf("finding response omits %q: %s", publicField, body)
+		}
+	}
+}

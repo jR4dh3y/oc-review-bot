@@ -50,12 +50,30 @@ type reviewJSON struct {
 	FindingsCount    int    `json:"findings_count"`
 }
 
+type findingJSON struct {
+	ID              int64  `json:"id"`
+	ReviewID        int64  `json:"review_id"`
+	Path            string `json:"path"`
+	Line            int64  `json:"line"`
+	Side            string `json:"side"`
+	Severity        string `json:"severity"`
+	Body            string `json:"body"`
+	PostedCommentID int64  `json:"posted_comment_id"`
+}
+
 func toReviewJSON(r store.Review, findings int) reviewJSON {
 	return reviewJSON{
 		ID: r.ID, RepoFull: r.RepoFull, PRNumber: r.PRNumber, HeadSHA: r.HeadSHA,
 		RequesterLogin: r.RequesterLogin, Status: r.Status, Model: r.Model,
 		SummaryMD: r.SummaryMD, Error: r.Error, SummaryCommentID: r.SummaryCommentID,
 		CreatedAt: r.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), FindingsCount: findings,
+	}
+}
+
+func toFindingJSON(f store.Finding) findingJSON {
+	return findingJSON{
+		ID: f.ID, ReviewID: f.ReviewID, Path: f.Path, Line: f.Line, Side: f.Side,
+		Severity: f.Severity, Body: f.BodyMD, PostedCommentID: f.PostedCommentID,
 	}
 }
 
@@ -117,9 +135,13 @@ func (s *Server) handleReviewDetail(u *store.User, w http.ResponseWriter, r *htt
 		writeErr(w, http.StatusInternalServerError, "db failed")
 		return
 	}
+	publicFindings := make([]findingJSON, 0, len(findings))
+	for _, finding := range findings {
+		publicFindings = append(publicFindings, toFindingJSON(finding))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review":   toReviewJSON(*rev, len(findings)),
-		"findings": findings,
+		"findings": publicFindings,
 	})
 }
 
