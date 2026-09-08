@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,10 +9,12 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -641,4 +644,142 @@ func newBotTestApp(t *testing.T, base string) *gh.App {
 		t.Fatal(err)
 	}
 	return app
+}
+
+// reviewFailureHarness fakes GitHub for a full review attempt and records the
+// trigger-comment reactions and result comments the engine issues.
+type reviewFailureHarness struct {
+	reactions []string
+	comments  int
+}
+
+func newReviewFailureHarness(t *testing.T, runErr error, logOut *bytes.Buffer) (*store.Review, *Engine, *store.Store, *reviewFailureHarness) {
+	t.Helper()
+	const expectedSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	h := &reviewFailureHarness{}
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"token":      "installation-token",
+				"expires_at": time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
+			if r.Header.Get("Accept") == "application/vnd.github.diff" {
+				_, _ = w.Write([]byte("diff --git a/file.go b/file.go\n"))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 7,
+				"head":   map[string]string{"sha": expectedSHA},
+				"base": map[string]any{
+					"sha":  "def",
+					"repo": map[string]any{"id": 7, "full_name": "o/r"},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7/files":
+			_ = json.NewEncoder(w).Encode([]gh.File{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/comments/99/reactions":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			h.reactions = append(h.reactions, body["content"])
+			_ = json.NewEncoder(w).Encode(map[string]int64{"id": 1})
+		case r.Method == http.MethodPost &&
+			(r.URL.Path == "/repos/o/r/issues/7/comments" || r.URL.Path == "/repos/o/r/pulls/7/comments"):
+			h.comments++
+			_ = json.NewEncoder(w).Encode(map[string]int64{"id": 1})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(github.Close)
+
+	app := newBotTestApp(t, github.URL)
+	st := testStoreForEngine(t)
+	if _, err := st.AddKey("key", "sk-test-1234"); err != nil {
+		t.Fatal(err)
+	}
+	rev := &store.Review{
+		RepoFull:          "o/r",
+		RepositoryID:      7,
+		PRNumber:          7,
+		InstallationID:    1,
+		RequesterGitHubID: 42,
+		RequesterLogin:    "alice",
+		TriggerCommentID:  99,
+	}
+	if err := st.CreateReview(rev); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if logOut != nil {
+		logger = slog.New(slog.NewTextHandler(logOut, nil))
+	}
+	eng := NewEngine(&config.Config{
+		OpenCodeBin:     "opencode2",
+		OpenCodeArgs:    []string{"--standalone"},
+		DefaultModel:    "opencode/reviewer",
+		AdminGitHubIDs:  []int64{42},
+		InstallationIDs: []int64{1},
+		RepositoryIDs:   []int64{7},
+	}, st, app, pool.New(st, time.Hour), logger)
+	eng.run = func(context.Context, runner.Options) (string, error) { return "", runErr }
+	lease := testEngineLease(t, st, "review-failure-owner")
+	eng.startMu.Lock()
+	eng.started = true
+	eng.ready = true
+	eng.leaseOwner = lease.OwnerToken
+	eng.leaseFence = lease.Fence
+	eng.startMu.Unlock()
+	t.Cleanup(func() { _, _ = st.ReleaseServiceLease(lease.OwnerToken, lease.Fence) })
+	return rev, eng, st, h
+}
+
+func TestTerminalAgentFailureMarksReviewFailed(t *testing.T) {
+	var logs bytes.Buffer
+	runErr := fmt.Errorf("run reviewer: %w", &runner.AgentFailure{
+		Err:        fmt.Errorf("%w: agent exited", runner.ErrExecution),
+		Diagnostic: "model reviewer not found",
+	})
+	rev, eng, st, h := newReviewFailureHarness(t, runErr, &logs)
+
+	eng.processOne(context.Background(), rev.ID)
+
+	got, err := st.Review(rev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusFailed {
+		t.Fatalf("review status = %s, want %s (stuck-running regression)", got.Status, store.StatusFailed)
+	}
+	if !strings.Contains(got.Error, "opencode_execution") {
+		t.Fatalf("stored error = %q, want cause opencode_execution", got.Error)
+	}
+	if want := []string{"eyes", "-1"}; !reflect.DeepEqual(h.reactions, want) {
+		t.Fatalf("reactions = %v, want %v", h.reactions, want)
+	}
+	if h.comments != 0 {
+		t.Fatalf("posted %d result comments on failure", h.comments)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "cause=opencode_execution") || !strings.Contains(logged, `detail="model reviewer not found"`) {
+		t.Fatalf("terminal failure log missing cause or diagnostic: %s", logged)
+	}
+}
+
+func TestCanceledReviewContextStaysRecoverable(t *testing.T) {
+	rev, eng, st, h := newReviewFailureHarness(t, context.Canceled, nil)
+
+	eng.processOne(context.Background(), rev.ID)
+
+	got, err := st.Review(rev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusRunning || got.Error != "" {
+		t.Fatalf("canceled review = status %s, error %q; want durable running row for restart recovery", got.Status, got.Error)
+	}
+	if want := []string{"eyes"}; !reflect.DeepEqual(h.reactions, want) {
+		t.Fatalf("reactions = %v, want %v (no failure signal on cancellation)", h.reactions, want)
+	}
 }

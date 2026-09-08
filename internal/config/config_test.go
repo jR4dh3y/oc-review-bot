@@ -1,11 +1,46 @@
 package config
 
 import (
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLogLevel(t *testing.T) {
+	cases := map[string]struct {
+		want    slog.Level
+		wantErr bool
+	}{
+		"":        {want: slog.LevelInfo},
+		"debug":   {want: slog.LevelDebug},
+		"INFO":    {want: slog.LevelInfo},
+		" Warn ":  {want: slog.LevelWarn},
+		"warning": {want: slog.LevelWarn},
+		"error":   {want: slog.LevelError},
+		"verbose": {wantErr: true},
+	}
+	for value, want := range cases {
+		t.Run(value, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("LOG_LEVEL", value)
+			cfg, err := Load()
+			if want.wantErr {
+				if err == nil {
+					t.Fatalf("Load() = nil error, want LOG_LEVEL rejection")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.LogLevel != want.want {
+				t.Fatalf("LogLevel = %v, want %v", cfg.LogLevel, want.want)
+			}
+		})
+	}
+}
 
 func setRequiredEnv(t *testing.T) {
 	t.Helper()

@@ -161,7 +161,9 @@ the dashboard and rotate it at the provider if it is suspected of exposure. Do n
 Probe `GET /healthz` for basic process liveness. It returns a static success response and does not
 verify GitHub connectivity, the OpenCode binary, the Zen provider, or SQLite health, so also monitor
 review completion/failure rates and the dashboard queue. Alert on repeated quota failures, failed
-reviews, unavailable eligible keys, and unexpected restart loops.
+reviews, unavailable eligible keys, and unexpected restart loops. Terminal review failures log the
+operator-safe cause plus a bounded, sanitized reviewer-stderr excerpt for agent and sandbox
+failures; run with `LOG_LEVEL=debug` while diagnosing, then return to `info`.
 
 Roll out OpenCode 2 beta upgrades first in a non-production environment with a funded,
 organization-authorized test key and a disposable test PR. The beta CLI/configuration contract may

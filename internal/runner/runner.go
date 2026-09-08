@@ -37,6 +37,65 @@ var ErrQuota = errors.New("zen quota or rate limit hit")
 // output, which can contain hostile repository content or provider secrets.
 var ErrExecution = errors.New("opencode review execution failed")
 
+// AgentFailure attaches a bounded, sanitized diagnostic excerpt to an
+// execution failure. Error prints only the sentinel, so the excerpt surfaces
+// only where the engine deliberately logs it; it must never be persisted.
+type AgentFailure struct {
+	Err        error
+	Diagnostic string
+}
+
+func (a *AgentFailure) Error() string { return a.Err.Error() }
+func (a *AgentFailure) Unwrap() error { return a.Err }
+
+// Diagnostic returns the sanitized agent excerpt attached to err, if any.
+func Diagnostic(err error) string {
+	var a *AgentFailure
+	if errors.As(err, &a) {
+		return a.Diagnostic
+	}
+	return ""
+}
+
+const maxDiagnosticBytes = 600
+
+var (
+	ansiEscape = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
+	secretish  = regexp.MustCompile("[A-Za-z0-9_.-]{24,}")
+)
+
+// sanitizeDiagnostic reduces untrusted agent output to a bounded, log-safe
+// excerpt: ANSI and control sequences removed, token-shaped runs redacted,
+// whitespace collapsed, and the tail kept because failures print last.
+func sanitizeDiagnostic(s string) string {
+	s = ansiEscape.ReplaceAllString(s, " ")
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+	s = secretish.ReplaceAllString(s, "[redacted]")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= maxDiagnosticBytes {
+		return s
+	}
+	s = s[len(s)-maxDiagnosticBytes:]
+	if i := strings.IndexByte(s, ' '); i >= 0 {
+		s = s[i+1:]
+	}
+	return "…" + strings.TrimSpace(s)
+}
+
+// agentFailureDetail prefers stderr, which carries process errors, and falls
+// back to stdout when the reviewer printed its failure there.
+func agentFailureDetail(stderr, stdout string) string {
+	if detail := sanitizeDiagnostic(stderr); detail != "" {
+		return detail
+	}
+	return sanitizeDiagnostic(stdout)
+}
+
 // ErrHeadChanged means the pull request ref no longer resolves to the commit
 // captured by the worker. The review must not be posted against a different
 // revision.
@@ -101,7 +160,8 @@ func Run(ctx context.Context, o Options) (string, error) {
 	}
 	sandbox, err := resolveSandboxRuntime(o)
 	if err != nil {
-		return "", err
+		// The resolver's messages are operator-owned configuration failures.
+		return "", &AgentFailure{Err: err, Diagnostic: sanitizeDiagnostic(err.Error())}
 	}
 	tmp, err := os.MkdirTemp("", "oc-review-*")
 	if err != nil {
@@ -169,7 +229,10 @@ func Run(ctx context.Context, o Options) (string, error) {
 	}
 	stderr.onExceeded = stdout.onExceeded
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("%w: start bubblewrap reviewer", ErrSandboxUnavailable)
+		return "", &AgentFailure{
+			Err:        fmt.Errorf("%w: start bubblewrap reviewer", ErrSandboxUnavailable),
+			Diagnostic: sanitizeDiagnostic(err.Error()),
+		}
 	}
 	pid := cmd.Process.Pid
 	done := make(chan error, 1)
@@ -182,17 +245,23 @@ func Run(ctx context.Context, o Options) (string, error) {
 		return "", fmt.Errorf("%w: %w", ErrExecution, ctx.Err())
 	case err := <-done:
 		if stdout.exceeded || stderr.exceeded {
-			return "", fmt.Errorf("%w: %w", ErrExecution, ErrOutputTooLarge)
+			return "", &AgentFailure{
+				Err:        fmt.Errorf("%w: %w", ErrExecution, ErrOutputTooLarge),
+				Diagnostic: agentFailureDetail(stderr.String(), stdout.String()),
+			}
 		}
 		if err != nil {
 			if isQuotaError(stderr.String()) {
 				return "", ErrQuota
 			}
-			return "", ErrExecution
+			return "", &AgentFailure{Err: ErrExecution, Diagnostic: agentFailureDetail(stderr.String(), stdout.String())}
 		}
 	}
 	if stdout.exceeded || stderr.exceeded {
-		return "", fmt.Errorf("%w: %w", ErrExecution, ErrOutputTooLarge)
+		return "", &AgentFailure{
+			Err:        fmt.Errorf("%w: %w", ErrExecution, ErrOutputTooLarge),
+			Diagnostic: agentFailureDetail(stderr.String(), stdout.String()),
+		}
 	}
 	return ExtractText(stdout.String()), nil
 }

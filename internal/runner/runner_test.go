@@ -450,6 +450,9 @@ func TestRunRefusesDirectExecutionWhenSandboxIsUnavailable(t *testing.T) {
 	if !errors.Is(err, ErrSandboxUnavailable) {
 		t.Fatalf("error = %v, want ErrSandboxUnavailable", err)
 	}
+	if got := Diagnostic(err); got == "" {
+		t.Fatalf("Diagnostic() = %q, want sanitized sandbox start error", got)
+	}
 }
 
 func TestRunFailsOnQuotaError(t *testing.T) {
@@ -475,6 +478,56 @@ exit 1
 	_, err := Run(context.Background(), runOptions(bin, runtimeDir, remote, head))
 	if !errors.Is(err, ErrExecution) || errors.Is(err, ErrQuota) {
 		t.Fatalf("error = %v, want non-quota ErrExecution", err)
+	}
+}
+
+func TestRunAttachesSanitizedDiagnosticOnExecutionFailure(t *testing.T) {
+	requireBubblewrap(t)
+	remote, head := initRemote(t, nil)
+	bin, runtimeDir := fakeRuntime(t, `
+printf '%s\n' 'model reviewer not found key sk-abcdefghijklmnopqrstuv' >&2
+exit 1
+`)
+	_, err := Run(context.Background(), runOptions(bin, runtimeDir, remote, head))
+	if !errors.Is(err, ErrExecution) || errors.Is(err, ErrQuota) {
+		t.Fatalf("error = %v, want non-quota ErrExecution", err)
+	}
+	got := Diagnostic(err)
+	if !strings.Contains(got, "model reviewer not found") {
+		t.Fatalf("Diagnostic() = %q, want agent stderr excerpt", got)
+	}
+	if strings.Contains(got, "sk-abcdefghijklmnopqrstuv") {
+		t.Fatalf("Diagnostic() = %q, leaked token-shaped stderr", got)
+	}
+}
+
+func TestDiagnosticExtractsFromWrappedAgentFailure(t *testing.T) {
+	err := fmt.Errorf("run agent: %w", &AgentFailure{
+		Err:        fmt.Errorf("%w: boom", ErrExecution),
+		Diagnostic: "model missing",
+	})
+	if !errors.Is(err, ErrExecution) {
+		t.Fatalf("error = %v, want ErrExecution chain", err)
+	}
+	if got := Diagnostic(err); got != "model missing" {
+		t.Fatalf("Diagnostic() = %q, want %q", got, "model missing")
+	}
+}
+
+func TestSanitizeDiagnostic(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"strips ansi and control bytes", "\x1b[31mmodel reviewer not found\x1b[0m\x07", "model reviewer not found"},
+		{"redacts token shaped runs", "auth failed for key sk-abcdefghijklmnopqrstuv", "auth failed for key [redacted]"},
+		{"collapses whitespace", "  a\n\tb  ", "a b"},
+		{"empty stays empty", "", ""},
+		{"keeps bounded tail", strings.Repeat("word ", 200), "…" + strings.TrimSuffix(strings.Repeat("word ", 120), " ")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeDiagnostic(tc.in); got != tc.want {
+				t.Fatalf("sanitizeDiagnostic() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
