@@ -10,6 +10,7 @@ const maxReviewMetadataBytes = 256
 // OutputContract is the JSON shape the agent must end its message with.
 const OutputContract = `{
   "summary": "one-paragraph PR review summary in markdown",
+  "sequence_diagram": "Mermaid sequence diagram source with escaped newlines; no markdown fences",
   "findings": [
     {
       "path": "relative/file/path.go",
@@ -43,6 +44,9 @@ Rules:
 - Report at most %d findings, most important first. If the diff is clean, return an empty findings array.
 - Keep the summary under %d bytes, each finding body under %d bytes, and each path under %d bytes.
 - Write finding bodies in markdown, concise and actionable, addressed to the PR author.
+- Include one concise sequence diagram showing the important components and interactions changed by the PR.
+- "sequence_diagram" must be a Mermaid sequence diagram source string. Start it with "sequenceDiagram",
+  use JSON-escaped newline characters between lines, and do not wrap it in markdown fences. Keep it to 4–12 messages.
 
 Your final message MUST end with a fenced JSON block exactly matching this
 schema and nothing after it:
@@ -90,6 +94,10 @@ func RenderSummaryComment(result ReviewResult, botName, model string) string {
 	b.WriteString(fmt.Sprintf("## 🤖 %s review\n\n", botName))
 	b.WriteString(normalizeMarkdown(result.SummaryMD, maxSummaryBytes))
 
+	b.WriteString("\n\n### Sequence diagram\n\n```mermaid\n")
+	b.WriteString(normalizeSequenceDiagram(result.SequenceDiagram))
+	b.WriteString("\n```\n\n")
+
 	renderedFindings := 0
 	for i, candidate := range result.Findings {
 		if i >= maxFindingCandidates || renderedFindings >= maxFindings {
@@ -99,17 +107,20 @@ func RenderSummaryComment(result ReviewResult, botName, model string) string {
 		if !ok {
 			continue
 		}
-		loc := fmt.Sprintf("`%s:%d`", f.Path, f.Line)
-		finding := fmt.Sprintf("- %s — %s\n", loc, severityBadge(f.Severity)) +
-			"  \n" + indentLines(f.Body, "  ")
 		if renderedFindings == 0 {
-			finding = "\n\n### Findings\n\n" + finding
+			b.WriteString("### Findings\n\n")
 		}
-		if b.Len()+len(finding)+len(footer) > maxGitHubCommentBytes {
+		finding := fmt.Sprintf("- `%s:%d` — %s\n", f.Path, f.Line, severityBadge(f.Severity))
+		if b.Len()+len(finding)+len("\nIndividual findings are posted as inline comments on the changed lines below.")+len(footer) > maxGitHubCommentBytes {
 			break
 		}
 		b.WriteString(finding)
 		renderedFindings++
+	}
+	if renderedFindings > 0 {
+		b.WriteString("\nIndividual findings are posted as inline comments on the changed lines below.")
+	} else {
+		b.WriteString("✅ No inline findings were reported.")
 	}
 
 	b.WriteString(footer)
@@ -120,15 +131,4 @@ func normalizeMetadata(value string) string {
 	value = normalizeMarkdown(value, maxReviewMetadataBytes)
 	value = strings.NewReplacer("\n", " ", "\t", " ").Replace(value)
 	return strings.TrimSpace(value)
-}
-
-// indentLines prefixes every line of s with pad, so list items nest cleanly.
-func indentLines(s, pad string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	for i, l := range lines {
-		if l != "" {
-			lines[i] = pad + l
-		}
-	}
-	return strings.Join(lines, "\n")
 }

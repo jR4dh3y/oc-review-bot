@@ -28,7 +28,6 @@ const (
 
 	sandboxHomeTmpfsSize      = "16777216" // 16 MiB
 	sandboxConfigTmpfsSize    = "8388608"  // 8 MiB
-	sandboxDataTmpfsSize      = "8388608"  // 8 MiB
 	sandboxCacheTmpfsSize     = "33554432" // 32 MiB
 	sandboxStateTmpfsSize     = "16777216" // 16 MiB
 	sandboxRuntimeTmpfsSize   = "8388608"  // 8 MiB
@@ -87,12 +86,16 @@ func Preflight(bin, runtimeDir, bubblewrapBin string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	for _, opencodeArgs := range [][]string{{"--version"}, {"--standalone", "run", "--help"}} {
+	dataDir := filepath.Join(tmp, "xdg-data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
+	}
+	for _, opencodeArgs := range [][]string{{"--version"}, {"run", "--standalone", "--help"}} {
 		files, err := newSandboxFiles(tmp, "preflight")
 		if err != nil {
 			return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 		}
-		cmd := exec.CommandContext(ctx, paths.bwrap, sandboxCommand(paths, checkout, files, opencodeArgs)...)
+		cmd := exec.CommandContext(ctx, paths.bwrap, sandboxCommand(paths, checkout, files, dataDir, opencodeArgs)...)
 		cmd.Dir = tmp
 		cmd.Env = sandboxEnvironment()
 		cmd.ExtraFiles = []*os.File{files.config, files.auth}
@@ -338,7 +341,7 @@ func jsonConfigFile(path string, value any) (*os.File, error) {
 	return os.Open(path)
 }
 
-func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, opencodeArgs []string) []string {
+func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, dataDir string, opencodeArgs []string) []string {
 	args := []string{
 		"--die-with-parent",
 		"--unshare-user",
@@ -395,8 +398,10 @@ func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, 
 		"--tmpfs", "/xdg-config",
 		"--dir", "/xdg-config/opencode",
 		"--ro-bind-data", fmt.Sprint(configFD), "/xdg-config/opencode/opencode.json",
-		"--size", sandboxDataTmpfsSize,
-		"--tmpfs", "/xdg-data",
+		// The current beta cannot create its session database on a tmpfs
+		// /xdg-data (Session.create fails); bind a per-run host directory
+		// with the same lifetime instead. It carries no cross-run state.
+		"--bind", dataDir, "/xdg-data",
 		"--dir", "/xdg-data/opencode",
 		"--ro-bind-data", fmt.Sprint(authFD), "/xdg-data/opencode/auth.json",
 		"--size", sandboxCacheTmpfsSize,

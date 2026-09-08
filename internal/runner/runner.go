@@ -129,24 +129,24 @@ func Run(ctx context.Context, o Options) (string, error) {
 		return "", err
 	}
 	defer files.Close()
+	// The reviewer's data directory lives on the host, not tmpfs: the
+	// current beta fails to create its session database on tmpfs.
+	dataDir := filepath.Join(tmp, "xdg-data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return "", err
+	}
 
-	// OpenCode 2 documents --standalone as a global flag. Keep it fixed so a
-	// run cannot attach to a host-user's shared OpenCode service.
-	args := append([]string{}, o.RunArgs...)
-	args = append(args, "run")
-	args = append(args,
-		"--agent", "reviewer",
-		"--model", o.Model,
-		"--format", "json",
-		"--file", sandboxDiffPath,
-		o.Prompt,
-	)
+	// The current OpenCode 2 beta accepts --standalone as a run flag: placed
+	// before run, the CLI exits with "Unrecognized flag". Keep it fixed right
+	// after run so a review cannot attach to a host-user's shared OpenCode
+	// service.
+	args := opencodeRunArgs(o)
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrExecution, err)
 	}
 	// Do not use CommandContext here: its cancellation kills only the direct
 	// child, while OpenCode may have helper processes in the same group.
-	cmd := exec.Command(sandbox.bwrap, sandboxCommand(sandbox, checkoutDir, files, args)...)
+	cmd := exec.Command(sandbox.bwrap, sandboxCommand(sandbox, checkoutDir, files, dataDir, args)...)
 	cmd.Dir = tmp
 	// The launcher must receive this sanitized environment too: a process in
 	// the sandbox can otherwise read its parent's environment through /proc.
@@ -199,6 +199,20 @@ func killProcessGroup(pid int) {
 	}
 }
 
+// opencodeRunArgs builds the reviewer command line: run first, then the
+// fixed isolation flags, then the review invocation.
+func opencodeRunArgs(o Options) []string {
+	args := []string{"run"}
+	args = append(args, o.RunArgs...)
+	return append(args,
+		"--agent", "reviewer",
+		"--model", o.Model,
+		"--format", "json",
+		"--file", sandboxDiffPath,
+		o.Prompt,
+	)
+}
+
 func validateOptions(o Options) error {
 	if o.CloneURL == "" || o.Ref == "" || o.ExpectedSHA == "" || o.Model == "" || o.APIKey == "" || o.RuntimeDir == "" {
 		return errors.New("clone URL, ref, expected SHA, model, API key, and OpenCode runtime directory are required")
@@ -222,7 +236,7 @@ func validateOptions(o Options) error {
 		}
 	}
 	if !validOpenCodeRunArgs(o.RunArgs) {
-		return errors.New("OpenCode must run with exactly the global --standalone flag")
+		return errors.New("OpenCode must run with exactly the --standalone run flag")
 	}
 	return nil
 }
@@ -902,9 +916,10 @@ func openCodeConfig() map[string]any {
 		// OpenCode reads the provider key from the isolated auth store. Keeping it
 		// out of the child environment removes an easy exfiltration path.
 		"permissions": permissions,
-		// V2 disables every plugin explicitly; an empty list would merge with a
-		// lower-precedence remote configuration.
-		"plugins": []string{"-*"},
+		// The sandbox XDG tree is an empty tmpfs and project configuration is
+		// disabled, so no plugin source remains. Do not emit a "plugins" key:
+		// the current beta silently drops the whole configuration, agents
+		// included, when any plugins entry is present.
 		"mcp": map[string]any{
 			"servers": map[string]any{},
 		},

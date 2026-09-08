@@ -16,6 +16,7 @@ and a missing test.
 ` + "```json" + `
 {
   "summary": "Adds a cache layer with decent structure.",
+  "sequence_diagram": "sequenceDiagram\n    participant API\n    participant Cache\n    API->>Cache: Get value\n    Cache-->>API: Return value",
   "findings": [
     {"path": "internal/cache/cache.go", "line": 42, "side": "RIGHT", "severity": "warning",
      "body": "Get ignores the decode error."},
@@ -34,6 +35,9 @@ func TestExtractReviewContract(t *testing.T) {
 
 	if !strings.HasPrefix(r.SummaryMD, "Adds a cache layer") {
 		t.Fatalf("summary = %q", r.SummaryMD)
+	}
+	if !strings.Contains(r.SequenceDiagram, "API->>Cache: Get value") {
+		t.Fatalf("sequence diagram = %q", r.SequenceDiagram)
 	}
 	if len(r.Findings) != 2 {
 		t.Fatalf("want 2 valid findings, got %d: %+v", len(r.Findings), r.Findings)
@@ -156,7 +160,7 @@ func TestExtractReviewBoundsUntrustedOutput(t *testing.T) {
 func TestExtractReviewNoContract(t *testing.T) {
 	out := "The PR looks great overall, ship it.\nSecond line."
 	r := ExtractReview(out)
-	if r.SummaryMD != out || len(r.Findings) != 0 {
+	if r.SummaryMD != out || len(r.Findings) != 0 || !strings.HasPrefix(r.SequenceDiagram, "sequenceDiagram") {
 		t.Fatalf("fallback failed: %+v", r)
 	}
 }
@@ -277,13 +281,61 @@ func TestRenderSummaryComment(t *testing.T) {
 
 	for _, want := range []string{
 		"## 🤖 oc-review-bot review",
+		"### Sequence diagram",
+		"```mermaid",
+		"API->>Cache: Get value",
 		"internal/cache/cache.go:42",
 		"🟠 **warning**",
+		"Individual findings are posted as inline comments",
 		"@oc-review-bot",
 		"opencode/big-pickle",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary comment missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Get ignores the decode error") {
+		t.Fatalf("summary should not duplicate individual finding bodies:\n%s", out)
+	}
+	if strings.Index(out, "Adds a cache layer") > strings.Index(out, "### Sequence diagram") {
+		t.Fatal("summary should precede sequence diagram")
+	}
+}
+
+func TestNormalizeSequenceDiagramStripsFences(t *testing.T) {
+	out := ExtractReview("```json\n{" +
+		`"summary":"s","sequence_diagram":"` +
+		"```mermaid\\nsequenceDiagram\\n    A->>B: Call\\n```" +
+		`","findings":[]}` + "\n```")
+	if want := "sequenceDiagram\n    A->>B: Call"; out.SequenceDiagram != want {
+		t.Fatalf("diagram = %q, want %q", out.SequenceDiagram, want)
+	}
+}
+
+func TestNormalizeSequenceDiagramFallsBackAndBoundsOutput(t *testing.T) {
+	malformed := ExtractReview(fencedJSON(t, map[string]any{
+		"summary":          "s",
+		"sequence_diagram": "this is not Mermaid",
+	}))
+	if malformed.SequenceDiagram != fallbackSequenceDiagram {
+		t.Fatalf("malformed diagram = %q, want fallback", malformed.SequenceDiagram)
+	}
+
+	oversized := ExtractReview(fencedJSON(t, map[string]any{
+		"summary":          "s",
+		"sequence_diagram": "sequenceDiagram\nA->>B: Call\n" + strings.Repeat("participant A\n", maxSequenceDiagramBytes),
+	}))
+	if len(oversized.SequenceDiagram) > maxSequenceDiagramBytes ||
+		!strings.Contains(oversized.SequenceDiagram, "A->>B: Call") {
+		t.Fatalf("oversized diagram was not safely bounded: len=%d, diagram=%q", len(oversized.SequenceDiagram), oversized.SequenceDiagram)
+	}
+}
+
+func TestBuildPromptRequestsDiagram(t *testing.T) {
+	prompt := BuildPrompt("review-diff.patch")
+	for _, want := range []string{"sequence_diagram", "Mermaid sequence diagram", "JSON-escaped"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }

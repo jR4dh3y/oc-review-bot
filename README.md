@@ -3,8 +3,9 @@
 Greptile/CodeRabbit-style PR review bot. Mention `@oc-review-bot` in a PR comment and it runs
 [OpenCode 2 beta](https://opencode.ai/v2/docs) (`opencode2`) against the PR diff using a pool of
 organization-authorized OpenCode Zen API keys, then posts one summary comment plus inline findings
-pinned to diff lines. A React dashboard handles registration and administrator key management. One
-Go binary serves everything.
+pinned to diff lines. The summary includes a Mermaid sequence diagram and precedes the inline
+findings. A React dashboard handles registration and administrator key management. One Go binary
+serves everything.
 
 > **OpenCode and Zen status.** OpenCode 2 is beta software and its CLI/configuration can change.
 > This service invokes an externally installed `opencode2` binary; it is not bundled with the Go or
@@ -27,11 +28,12 @@ Go binary serves everything.
    dir → run
    `opencode2 run` in standalone mode with the review prompt (the agent reads repository files
    itself), selected model, JSON output, and a hard timeout.
-3. Parse the agent's final message: last fenced JSON block `{summary, findings:[{path, line,
-   side, severity, body}]}` (tolerant — plain text becomes summary-only) → map findings to diff
-   lines via the PR file list (skip findings outside the diff) → post inline review comments +
-   summary comment → react 🚀/❌ → record per-key usage. A 402/429/quota failure cools that key
-   for `ZEN_COOLDOWN_MINUTES` and may retry once with another eligible, authorized key.
+3. Parse the agent's final message: last fenced JSON block `{summary, sequence_diagram, findings:[{path,
+   line, side, severity, body}]}` (tolerant — plain text gets a safe fallback diagram) → map findings
+   to diff lines via the PR file list (skip findings outside the diff) → post the summary with its
+   Mermaid diagram first, then inline review comments → react 🚀/❌ → record per-key usage. A
+   402/429/quota failure cools that key for `ZEN_COOLDOWN_MINUTES` and may retry once with another
+   eligible, authorized key.
 
 ## Local setup
 
@@ -125,7 +127,8 @@ set `BOT_USERNAME` to its mentionable login without a leading `@`.
 ### 4. Try it
 
 Open a PR on an installed repo, comment `@oc-review-bot review please`, expect a 👀 reaction,
-then a summary comment + inline findings. Unregistered commenters get a register-here reply.
+then a summary comment with a Mermaid sequence diagram followed by inline findings. Unregistered
+commenters get a register-here reply.
 
 ## Configuration
 
@@ -195,7 +198,8 @@ All JSON, session cookie `oc_review_session`:
 - `internal/pool` — least-used eligible-key selection + configurable cooldown; `internal/runner` —
   shallow clone + isolated `opencode2` exec + `--format json` text extraction
 - `internal/review` — prompt contract, tolerant findings parser, diff→line mapping
-- `internal/bot` — engine: fetch → runWithPool (one quota retry) → post → finish/fail
+- `internal/bot` — engine: fetch → runWithPool (one quota retry) → prepare and post the summary
+  publication before inline findings → finish/fail
 - `web/` — Vite + React + TS + TanStack Router/Query + shadcn-style UI (see above)
 
 ## Verification

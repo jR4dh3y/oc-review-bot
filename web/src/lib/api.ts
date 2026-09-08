@@ -77,6 +77,10 @@ export interface Settings {
   model: string;
 }
 
+export interface Meta {
+  bot_username: string;
+}
+
 export interface KeyCreateResult {
   id: number;
   label: string;
@@ -171,6 +175,7 @@ function normalizeFinding(finding: FindingResponse): Finding {
 
 export const api = {
   me: () => req<Me>("/api/me"),
+  meta: () => req<Meta>("/api/meta"),
   reviews: () => req<ReviewListItem[]>("/api/reviews"),
   reviewDetail: async (id: number | string): Promise<ReviewDetail> => {
     const detail = await req<ReviewDetailResponse>(`/api/reviews/${id}`);

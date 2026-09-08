@@ -43,7 +43,7 @@ func New(cfg *config.Config, st *store.Store, app *gh.App, eng *bot.Engine, log 
 	mux.HandleFunc("GET /auth/github/login", s.handleOAuthLogin)
 	mux.HandleFunc("GET /auth/github/callback", s.handleOAuthCallback)
 	mux.HandleFunc("POST /auth/logout", s.withTrustedOrigin(s.handleLogout))
-
+	mux.HandleFunc("GET /api/meta", s.handleMeta)
 	mux.HandleFunc("GET /api/me", s.withUser(s.handleMe))
 	mux.HandleFunc("GET /api/reviews", s.withUser(s.handleReviews))
 	mux.HandleFunc("GET /api/reviews/{id}", s.withUser(s.handleReviewDetail))

@@ -256,3 +256,12 @@ func (s *Server) handleSetSettings(u *store.User, w http.ResponseWriter, r *http
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "updated"})
 }
+
+// handleMeta exposes unauthenticated public branding: the mentionable bot
+// login the landing page and dashboard tell users to mention. The login is
+// already public in every posted nudge comment, so this needs no session.
+func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"bot_username": s.cfg.BotUsername,
+	})
+}

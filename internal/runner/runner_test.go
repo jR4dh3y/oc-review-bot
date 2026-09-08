@@ -69,6 +69,59 @@ func TestOpenCodeConfigUsesOnlyV2Permissions(t *testing.T) {
 	if _, ok := reviewer["permission"]; ok {
 		t.Fatal("V1 reviewer permission field must not be emitted")
 	}
+	// The current beta silently drops the whole configuration, agents
+	// included, when any plugins entry is present (observed with ["-*"]).
+	if plugins, ok := cfg["plugins"]; ok {
+		t.Fatalf("plugins key must not be emitted, got %#v", plugins)
+	}
+}
+
+func TestOpencodeRunArgsPutStandaloneAfterRun(t *testing.T) {
+	got := opencodeRunArgs(Options{
+		RunArgs: []string{"--standalone"},
+		Model:   "opencode/big-pickle",
+		Prompt:  "review",
+	})
+	want := []string{"run", "--standalone", "--agent", "reviewer", "--model", "opencode/big-pickle", "--format", "json", "--file", sandboxDiffPath, "review"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestSandboxCommandBindsHostDataDir(t *testing.T) {
+	dir := t.TempDir()
+	mkfile := func(name string) *os.File {
+		t.Helper()
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { f.Close() })
+		return f
+	}
+	files := &sandboxFiles{config: mkfile("opencode.json"), auth: mkfile("auth.json")}
+	dataDir := filepath.Join(dir, "xdg-data")
+	args := sandboxCommand(
+		sandboxRuntime{bwrap: "bwrap", runtimeDir: dir, binary: "/opt/opencode-runtime/bin/opencode2"},
+		filepath.Join(dir, "checkout"), files, dataDir, []string{"run"},
+	)
+	bound := false
+	for i := 0; i+2 < len(args); i++ {
+		if args[i] == "--tmpfs" && args[i+1] == "/xdg-data" {
+			t.Fatal("xdg-data must not be tmpfs: the beta cannot create its session database there")
+		}
+		if args[i] == "--bind" && args[i+1] == dataDir && args[i+2] == "/xdg-data" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Fatalf("xdg-data must bind %q, args = %q", dataDir, args)
+	}
 }
 
 func TestExtractTextPlainFallback(t *testing.T) {
@@ -192,6 +245,7 @@ case "$auth" in *'"opencode"'*'"key":"sk-test-9999"'*) ;; *) exit 93;; esac
 IFS= read -r config < "$XDG_CONFIG_HOME/opencode/opencode.json" || true
 	case "$config" in *'"permissions"'*'"action":"shell"'*'"effect":"deny"'*'"share":"disabled"'*) ;; *) exit 94;; esac
 	case "$config" in *'"permission"'*|*'"bash"'*|*'"task"'*) exit 95;; esac
+	case "$config" in *'"plugins"'*) exit 104;; esac
 [ -f review-diff.patch ] || exit 95
 [ ! -e .git ] || exit 96
 [ ! -e .opencode ] || exit 97
@@ -350,8 +404,7 @@ func TestPreflightRunsOpenCodeInsideSandbox(t *testing.T) {
 	requireBubblewrap(t)
 	bin, runtimeDir := fakeRuntime(t, `
 set -eu
-[ "$1" = --version ] || exit 1
-printf '%s\n' 'opencode2 vtest'
+if [ "$1" = --version ]; then printf '%s\n' 'opencode2 vtest'; elif [ "$1" = run ]; then [ "$2" = --standalone ] || exit 2; else exit 1; fi
 `)
 	bubblewrapBin, err := testBubblewrapPath()
 	if err != nil {

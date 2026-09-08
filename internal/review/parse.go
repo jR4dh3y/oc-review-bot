@@ -37,14 +37,29 @@ type Finding struct {
 // ReviewResult is the structured review extracted from the agent's final
 // message: a PR-level summary plus optional line findings.
 type ReviewResult struct {
-	SummaryMD string
-	Findings  []Finding
+	SummaryMD       string
+	SequenceDiagram string
+	Findings        []Finding
 }
 
 type rawReview struct {
-	Summary  json.RawMessage `json:"summary"`
-	Findings json.RawMessage `json:"findings"`
+	Summary         json.RawMessage `json:"summary"`
+	SequenceDiagram json.RawMessage `json:"sequence_diagram"`
+	Findings        json.RawMessage `json:"findings"`
 }
+
+const fallbackSequenceDiagram = `sequenceDiagram
+    participant Author
+    participant GitHub
+    participant Bot
+    participant Reviewer
+    Author->>GitHub: Opens pull request
+    GitHub->>Bot: Receives review request
+    Bot->>Reviewer: Sends diff and repository context
+    Reviewer-->>Bot: Returns summary and findings
+    Bot-->>GitHub: Posts summary and inline findings`
+
+const maxSequenceDiagramBytes = 6000
 
 // ExtractReview parses the agent's final message. It looks for the last
 // fenced JSON block matching the agreed contract; when the agent ignored the
@@ -53,7 +68,10 @@ func ExtractReview(agentText string) ReviewResult {
 	if r, ok := parseFencedJSON(agentText); ok {
 		return r
 	}
-	return ReviewResult{SummaryMD: normalizeMarkdown(prefixUTF8(agentText, maxAgentTextBytes), maxSummaryBytes)}
+	return ReviewResult{
+		SummaryMD:       normalizeMarkdown(prefixUTF8(agentText, maxAgentTextBytes), maxSummaryBytes),
+		SequenceDiagram: fallbackSequenceDiagram,
+	}
 }
 
 func parseFencedJSON(text string) (ReviewResult, bool) {
@@ -106,7 +124,14 @@ func decodeReview(body string) (ReviewResult, bool) {
 	if len(raw.Summary) == 0 || json.Unmarshal(raw.Summary, &summary) != nil {
 		return ReviewResult{}, false
 	}
-	out := ReviewResult{SummaryMD: normalizeMarkdown(summary, maxSummaryBytes)}
+	var sequenceDiagram string
+	if len(raw.SequenceDiagram) > 0 {
+		_ = json.Unmarshal(raw.SequenceDiagram, &sequenceDiagram)
+	}
+	out := ReviewResult{
+		SummaryMD:       normalizeMarkdown(summary, maxSummaryBytes),
+		SequenceDiagram: normalizeSequenceDiagram(sequenceDiagram),
+	}
 	if out.SummaryMD == "" {
 		return ReviewResult{}, false
 	}
@@ -355,4 +380,50 @@ func cutUTF8(value string, maxBytes int) string {
 		end--
 	}
 	return value[:end]
+}
+
+// normalizeSequenceDiagram keeps model output to one bounded Mermaid sequence
+// diagram and falls back when the model returns prose or an empty body.
+func normalizeSequenceDiagram(raw string) string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		line = strings.TrimRight(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed == "```" || strings.EqualFold(trimmed, "```mermaid") {
+			continue
+		}
+		if strings.EqualFold(trimmed, "sequencediagram") || strings.HasPrefix(trimmed, "```") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+
+	if len(lines) == 0 || !containsSequenceMessage(lines) {
+		return fallbackSequenceDiagram
+	}
+
+	var b strings.Builder
+	b.WriteString("sequenceDiagram")
+	for _, line := range lines {
+		if b.Len()+len(line)+1 > maxSequenceDiagramBytes {
+			break
+		}
+		b.WriteByte('\n')
+		b.WriteString(line)
+	}
+	if b.Len() == len("sequenceDiagram") || !containsSequenceMessage(strings.Split(b.String(), "\n")[1:]) {
+		return fallbackSequenceDiagram
+	}
+	return b.String()
+}
+
+func containsSequenceMessage(lines []string) bool {
+	for _, line := range lines {
+		if strings.Contains(line, "->>") || strings.Contains(line, "-->>") ||
+			strings.Contains(line, "-x") || strings.Contains(line, "--x") ||
+			strings.Contains(line, "-)") || strings.Contains(line, "--)") {
+			return true
+		}
+	}
+	return false
 }
