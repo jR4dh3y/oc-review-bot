@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/jR4dh3y/samik-bot/internal/config"
 	"github.com/jR4dh3y/samik-bot/internal/store"
@@ -36,18 +37,20 @@ func (s *Server) handleMe(u *store.User, w http.ResponseWriter, r *http.Request)
 }
 
 type reviewJSON struct {
-	ID               int64  `json:"id"`
-	RepoFull         string `json:"repo_full"`
-	PRNumber         int64  `json:"pr_number"`
-	HeadSHA          string `json:"head_sha"`
-	RequesterLogin   string `json:"requester_login"`
-	Status           string `json:"status"`
-	Model            string `json:"model"`
-	SummaryMD        string `json:"summary_md"`
-	Error            string `json:"error"`
-	SummaryCommentID int64  `json:"summary_comment_id"`
-	CreatedAt        string `json:"created_at"`
-	FindingsCount    int    `json:"findings_count"`
+	ID               int64   `json:"id"`
+	RepoFull         string  `json:"repo_full"`
+	PRNumber         int64   `json:"pr_number"`
+	HeadSHA          string  `json:"head_sha"`
+	RequesterLogin   string  `json:"requester_login"`
+	Status           string  `json:"status"`
+	Model            string  `json:"model"`
+	SummaryMD        string  `json:"summary_md"`
+	Error            string  `json:"error"`
+	SummaryCommentID int64   `json:"summary_comment_id"`
+	CreatedAt        string  `json:"created_at"`
+	StartedAt        *string `json:"started_at"`
+	FinishedAt       *string `json:"finished_at"`
+	FindingsCount    int     `json:"findings_count"`
 }
 
 type findingJSON struct {
@@ -61,12 +64,31 @@ type findingJSON struct {
 	PostedCommentID int64  `json:"posted_comment_id"`
 }
 
+type eventsJSON struct {
+	ID        int64  `json:"id"`
+	Kind      string `json:"kind"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"created_at"`
+}
+
+// rfc3339Ptr formats a timestamp like created_at, or null when the review has
+// not reached that lifecycle point yet.
+func rfc3339Ptr(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	formatted := t.Format("2006-01-02T15:04:05Z07:00")
+	return &formatted
+}
+
 func toReviewJSON(r store.Review, findings int) reviewJSON {
 	return reviewJSON{
 		ID: r.ID, RepoFull: r.RepoFull, PRNumber: r.PRNumber, HeadSHA: r.HeadSHA,
 		RequesterLogin: r.RequesterLogin, Status: r.Status, Model: r.Model,
 		SummaryMD: r.SummaryMD, Error: r.Error, SummaryCommentID: r.SummaryCommentID,
-		CreatedAt: r.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), FindingsCount: findings,
+		CreatedAt: r.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		StartedAt: rfc3339Ptr(r.StartedAt), FinishedAt: rfc3339Ptr(r.FinishedAt),
+		FindingsCount: findings,
 	}
 }
 
@@ -74,6 +96,13 @@ func toFindingJSON(f store.Finding) findingJSON {
 	return findingJSON{
 		ID: f.ID, ReviewID: f.ReviewID, Path: f.Path, Line: f.Line, Side: f.Side,
 		Severity: f.Severity, Body: f.BodyMD, PostedCommentID: f.PostedCommentID,
+	}
+}
+
+func toEventJSON(ev store.ReviewEvent) eventsJSON {
+	return eventsJSON{
+		ID: ev.ID, Kind: ev.Kind, Message: ev.Message,
+		CreatedAt: ev.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 }
 
@@ -109,7 +138,7 @@ func (s *Server) handleReviews(u *store.User, w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleReviewDetail returns one review with its findings.
+// handleReviewDetail returns one review with its findings and progress events.
 func (s *Server) handleReviewDetail(u *store.User, w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -139,9 +168,19 @@ func (s *Server) handleReviewDetail(u *store.User, w http.ResponseWriter, r *htt
 	for _, finding := range findings {
 		publicFindings = append(publicFindings, toFindingJSON(finding))
 	}
+	events, err := s.st.ListReviewEvents(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "db failed")
+		return
+	}
+	publicEvents := make([]eventsJSON, 0, len(events))
+	for _, event := range events {
+		publicEvents = append(publicEvents, toEventJSON(event))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"review":   toReviewJSON(*rev, len(findings)),
 		"findings": publicFindings,
+		"events":   publicEvents,
 	})
 }
 

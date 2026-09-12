@@ -171,6 +171,11 @@ func (s *Server) handleIssueComment(w http.ResponseWriter, ev *issueCommentEvent
 		return
 	}
 
+	// The seed event is best-effort observability; it must never fail an
+	// accepted webhook delivery.
+	if err := s.st.AppendReviewEvent(rev.ID, "request", "Review requested by "+login); err != nil {
+		s.log.Warn("record review request event", "review", rev.ID, "err", err)
+	}
 	s.engine.Enqueue(rev.ID)
 	s.log.Info("review enqueued", "review", rev.ID, "repo", repo, "pr", pr, "by", login)
 	w.WriteHeader(http.StatusAccepted)

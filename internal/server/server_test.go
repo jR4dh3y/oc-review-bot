@@ -845,6 +845,158 @@ func TestReviewsAreScopedToRequesterUnlessAdmin(t *testing.T) {
 		t.Fatalf("admin foreign detail code = %d", rec.Code)
 	}
 }
+
+func TestReviewDetailIncludesProgressEventsAndTimestamps(t *testing.T) {
+	s, deps, _ := setup(t, nil)
+	alice, err := deps.st.UpsertUser(testRequesterID, "alice", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := &store.Review{
+		RepoFull: testRepoFull, RepositoryID: testRepositoryID, PRNumber: 1, InstallationID: testInstallationID,
+		RequesterGitHubID: testRequesterID, RequesterLogin: "alice", TriggerCommentID: 1,
+	}
+	if err := deps.st.CreateReview(review); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.st.AppendReviewEvent(review.ID, "request", "Review requested by alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.st.AppendReviewEvent(review.ID, "prepare", "Claimed for processing"); err != nil {
+		t.Fatal(err)
+	}
+	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
+	if err := deps.st.CreateSession(alice.ID, "detail-alice", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	session := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/api/reviews/"+strconv.FormatInt(review.ID, 10), nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "detail-alice"})
+		return req
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, session())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Review reviewJSON       `json:"review"`
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Events) != 2 {
+		t.Fatalf("events = %v, want 2 entries", detail.Events)
+	}
+	for i, want := range []struct{ kind, message string }{
+		{"request", "Review requested by alice"},
+		{"prepare", "Claimed for processing"},
+	} {
+		event := detail.Events[i]
+		if len(event) != 4 {
+			t.Fatalf("event %d keys = %v, want exactly id, kind, message, created_at", i, event)
+		}
+		for _, key := range []string{"id", "kind", "message", "created_at"} {
+			if _, ok := event[key]; !ok {
+				t.Fatalf("event %d missing key %q: %v", i, key, event)
+			}
+		}
+		if event["kind"] != want.kind || event["message"] != want.message {
+			t.Fatalf("event %d = %v, want kind %q message %q", i, event, want.kind, want.message)
+		}
+	}
+	if detail.Review.StartedAt != nil || detail.Review.FinishedAt != nil {
+		t.Fatalf("unstarted review timestamps = %v/%v, want null/null", detail.Review.StartedAt, detail.Review.FinishedAt)
+	}
+
+	// Claiming the review records started_at; it must serialize as RFC3339.
+	lease, acquired, err := deps.st.AcquireServiceLeaseWithFence("detail-test-owner", time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("acquire service lease = %+v, %v", lease, err)
+	}
+	if err := deps.st.StartReview(review.ID, "opencode/big-pickle", 0, lease.OwnerToken, lease.Fence); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, session())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail code after claim = %d", rec.Code)
+	}
+	var started struct {
+		Review reviewJSON `json:"review"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.Review.StartedAt == nil {
+		t.Fatal("started_at = null after claim")
+	}
+	if _, err := time.Parse(time.RFC3339, *started.Review.StartedAt); err != nil {
+		t.Fatalf("started_at = %q is not RFC3339: %v", *started.Review.StartedAt, err)
+	}
+	if started.Review.FinishedAt != nil {
+		t.Fatalf("finished_at = %v, want null", *started.Review.FinishedAt)
+	}
+
+	// The list endpoint stays lean: reviewJSON carries the timestamps, but the
+	// events feed belongs to the detail response only.
+	rec = httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/reviews", nil)
+	listReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: "detail-alice"})
+	h.ServeHTTP(rec, listReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list code = %d", rec.Code)
+	}
+	var rawList []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rawList); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawList) != 1 {
+		t.Fatalf("list = %v, want one review", rawList)
+	}
+	if _, ok := rawList[0]["events"]; ok {
+		t.Fatalf("list review exposes events: %v", rawList[0])
+	}
+}
+
+func TestWebhookSeedsRequestEventOnce(t *testing.T) {
+	s, deps, _ := setup(t, nil)
+	if _, err := deps.st.UpsertUser(testRequesterID, "alice", "", false); err != nil {
+		t.Fatal(err)
+	}
+	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
+
+	rec := postWebhook(t, h, "issue_comment", commentPayload("created", "@samik-bot review", "User", true))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	active, err := deps.st.ActiveReview(testRepositoryID, testPRNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := deps.st.ListReviewEvents(active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != "request" || events[0].Message != "Review requested by alice" {
+		t.Fatalf("events = %+v, want one request event", events)
+	}
+
+	// A second mention while queued is not a new request; it must not append.
+	rec = postWebhook(t, h, "issue_comment", commentPayload("created", "@samik-bot again", "User", true))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dedupe code = %d", rec.Code)
+	}
+	events, err = deps.st.ListReviewEvents(active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want the single request event", events)
+	}
+}
 func TestFindingJSONDoesNotExposeExecutionState(t *testing.T) {
 	encoded, err := json.Marshal(toFindingJSON(store.Finding{
 		ID:                1,
