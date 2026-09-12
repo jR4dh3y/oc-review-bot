@@ -4,6 +4,7 @@ import { Route as LandingRoute } from "./routes/index";
 import { Route as DashboardRoute, ReviewDetailRoute } from "./routes/dashboard";
 import { Route as AdminKeysRoute } from "./routes/admin.keys";
 import { Route as AdminSettingsRoute } from "./routes/admin.settings";
+import { Route as AdminPartnerRoute } from "./routes/admin.partner";
 
 const routeTree = RootRoute.addChildren([
   LandingRoute,
@@ -11,6 +12,7 @@ const routeTree = RootRoute.addChildren([
   ReviewDetailRoute,
   AdminKeysRoute,
   AdminSettingsRoute,
+  AdminPartnerRoute,
 ]);
 
 export const router = createRouter({ routeTree });

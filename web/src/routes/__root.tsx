@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Link, Outlet, createRootRoute } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
-import { BotMessageSquare, KeyRound, LayoutDashboard, LogOut, Settings2 } from "lucide-react";
+import { BadgePercent, BotMessageSquare, KeyRound, LayoutDashboard, LogOut, Settings2 } from "lucide-react";
 import { api, getErrorMessage, isUnauthenticatedError } from "@/lib/api";
 import { notifyAuthChange, useAuthSessionSync, useCurrentUser } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -77,6 +77,14 @@ function RootLayout() {
                   >
                     <span className="inline-flex items-center gap-1.5">
                       <Settings2 className="size-4" aria-hidden="true" /> Settings
+                    </span>
+                  </Link>
+                  <Link
+                    to="/admin/partner"
+                    className="shrink-0 rounded-md px-3 py-1.5 hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950 focus-visible:ring-offset-2 [&.active]:bg-zinc-900 [&.active]:text-white"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <BadgePercent className="size-4" aria-hidden="true" /> Partner
                     </span>
                   </Link>
                 </>
