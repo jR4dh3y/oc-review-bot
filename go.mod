@@ -1,4 +1,4 @@
-module github.com/jR4dh3y/oc-review-bot
+module github.com/jR4dh3y/samik-bot
 
 go 1.27.1
 

@@ -101,7 +101,7 @@ export class ApiError extends Error {
   }
 }
 
-export const authenticationRequiredEvent = "oc-review-bot:authentication-required";
+export const authenticationRequiredEvent = "samik-bot:authentication-required";
 
 export function notifyAuthenticationRequired() {
 	if (typeof window !== "undefined") {

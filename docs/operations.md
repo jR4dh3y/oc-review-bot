@@ -1,13 +1,13 @@
 # Deployment and operations
 
-This document describes the runtime contract for `oc-review-bot`. It is intentionally provider
+This document describes the runtime contract for `samik-bot`. It is intentionally provider
 neutral: deploy it on a host that can run the repository-pinned Go binary and the current supported
 OpenCode 2 beta CLI, rather than assuming a Docker image or a particular PaaS integration.
 
 ## Before first deploy
 
 1. Build the release artifact with `mise exec -- make build`. The resulting
-   `bin/oc-review-bot` contains the compiled dashboard from `web/dist`.
+   `bin/samik-bot` contains the compiled dashboard from `web/dist`.
 2. Provision a Linux review sandbox before enabling webhooks. Install the current OpenCode 2 beta
    client and Bubblewrap on the **runtime** host. The integration invokes `opencode2`, not the V1
    `opencode` executable. Package the OpenCode executable and its package files under the absolute
@@ -50,7 +50,7 @@ OpenCode 2 beta CLI, rather than assuming a Docker image or a particular PaaS in
 ## Runtime configuration
 
 Run one service process with environment variables injected by the platform. Start the released
-`bin/oc-review-bot` directly in production; `make run` is a source-checkout convenience that also
+`bin/samik-bot` directly in production; `make run` is a source-checkout convenience that also
 rebuilds the dashboard and therefore requires Go and Bun. `make run-local` is deliberately a
 local-development convenience that sources `.env`. The binary itself does not read dotenv files.
 
@@ -114,7 +114,7 @@ unbounded service resources.
 ## Persistent data and replicas
 
 Set `DB_PATH` to an absolute path inside a mounted, durable directory, for example a platform volume
-mounted at `/var/lib/oc-review-bot` with `DB_PATH=/var/lib/oc-review-bot/oc-review-bot.db`. Create
+mounted at `/var/lib/samik-bot` with `DB_PATH=/var/lib/samik-bot/samik-bot.db`. Create
 the parent directory before the service starts. Persist the whole directory, not only the main `.db`
 file: SQLite runs in WAL mode and can create `-wal` and `-shm` sidecars.
 

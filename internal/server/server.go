@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/bot"
-	"github.com/jR4dh3y/oc-review-bot/internal/config"
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/bot"
+	"github.com/jR4dh3y/samik-bot/internal/config"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 // Server holds shared dependencies for the HTTP handlers.
@@ -110,7 +110,7 @@ func spaHandler(spa embed.FS) http.Handler {
 		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "oc-review-bot API — the web UI is embedded at build time.")
+		fmt.Fprintln(w, "samik-bot API — the web UI is embedded at build time.")
 	})
 }
 
@@ -155,8 +155,8 @@ func (s *byteSeeker) Seek(offset int64, whence int) (int64, error) {
 // sessionCookie helpers.
 
 const (
-	sessionCookie     = "oc_review_session"
-	hostSessionCookie = "__Host-oc_review_session"
+	sessionCookie     = "samik_session"
+	hostSessionCookie = "__Host-samik_session"
 	oauthStateCookie  = "oc_oauth_state"
 	hostOAuthCookie   = "__Host-oc_oauth_state"
 )

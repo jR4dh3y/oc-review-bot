@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 const oauthStateLifetime = 10 * time.Minute

@@ -1,5 +1,5 @@
 {
-  "name": "oc-review-bot-web",
+  "name": "samik-bot-web",
   "private": true,
   "version": "0.1.0",
   "packageManager": "bun@1.4.0",

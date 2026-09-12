@@ -68,7 +68,7 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &response) && !IsRetryable(response)
 }
 
-const userAgent = "oc-review-bot"
+const userAgent = "samik-bot"
 
 const maxJSONResponseBytes = 10 << 20
 

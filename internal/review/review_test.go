@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
 )
 
 const sampleAgentOutput = `I reviewed the pull request.
@@ -277,17 +277,17 @@ func TestDiffIndexRejectsUnsafeFilePaths(t *testing.T) {
 
 func TestRenderSummaryComment(t *testing.T) {
 	r := ExtractReview(sampleAgentOutput)
-	out := RenderSummaryComment(r, "oc-review-bot", "opencode/big-pickle")
+	out := RenderSummaryComment(r, "samik-bot", "opencode/big-pickle")
 
 	for _, want := range []string{
-		"## 🤖 oc-review-bot review",
+		"## 🤖 samik-bot review",
 		"### Sequence diagram",
 		"```mermaid",
 		"API->>Cache: Get value",
 		"internal/cache/cache.go:42",
 		"🟠 **warning**",
 		"Individual findings are posted as inline comments",
-		"@oc-review-bot",
+		"@samik-bot",
 		"opencode/big-pickle",
 	} {
 		if !strings.Contains(out, want) {
@@ -359,7 +359,7 @@ func TestRenderSummaryCommentDropsUnsafeFindings(t *testing.T) {
 		},
 	}
 
-	out := RenderSummaryComment(result, "oc-review-bot", "model")
+	out := RenderSummaryComment(result, "samik-bot", "model")
 	if !strings.Contains(out, "valid.go:1") {
 		t.Fatalf("valid finding missing: %q", out)
 	}
@@ -388,9 +388,9 @@ func TestRenderedCommentsStayWithinGitHubLimit(t *testing.T) {
 	if got := RenderInlineBody(Finding{Body: strings.Repeat("x", maxGitHubCommentBytes)}); len(got) > maxGitHubCommentBytes {
 		t.Fatalf("inline body exceeds GitHub limit: %d", len(got))
 	}
-	if got := RenderSummaryComment(result, "oc-review-bot", "model"); len(got) > maxGitHubCommentBytes {
+	if got := RenderSummaryComment(result, "samik-bot", "model"); len(got) > maxGitHubCommentBytes {
 		t.Fatalf("summary body exceeds GitHub limit: %d", len(got))
-	} else if !strings.Contains(got, "Reviewed by oc-review-bot") {
+	} else if !strings.Contains(got, "Reviewed by samik-bot") {
 		t.Fatalf("summary footer was truncated: %q", got)
 	}
 }

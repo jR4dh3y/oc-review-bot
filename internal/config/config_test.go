@@ -193,10 +193,10 @@ func TestLoadUsesDefaultsAndStandaloneForOpenCode2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Port != "8080" || cfg.PublicURL != "http://localhost:8080" || cfg.DBPath != "oc-review-bot.db" {
+	if cfg.Port != "8080" || cfg.PublicURL != "http://localhost:8080" || cfg.DBPath != "samik-bot.db" {
 		t.Fatalf("unexpected network/database defaults: port=%q publicURL=%q dbPath=%q", cfg.Port, cfg.PublicURL, cfg.DBPath)
 	}
-	if cfg.BotUsername != "oc-review-bot" || cfg.OpenCodeBin != "opencode2" {
+	if cfg.BotUsername != "samik-bot" || cfg.OpenCodeBin != "opencode2" {
 		t.Fatalf("unexpected bot/runtime defaults: bot=%q bin=%q", cfg.BotUsername, cfg.OpenCodeBin)
 	}
 	if cfg.ReviewConcurrency != 2 || cfg.ReviewTimeout != 20*time.Minute || cfg.ZenCooldown != time.Hour ||
@@ -330,7 +330,7 @@ func TestLoadValidatesCurrentConstraints(t *testing.T) {
 		{"zero repository limit", "REPO_REVIEWS_PER_HOUR", "0"},
 		{"zero active limit", "MAX_ACTIVE_REVIEWS", "0"},
 		{"v1 OpenCode binary", "OPENCODE_BIN", "opencode"},
-		{"invalid bot login", "BOT_USERNAME", "@oc-review-bot"},
+		{"invalid bot login", "BOT_USERNAME", "@samik-bot"},
 		{"invalid bot ID", "BOT_GITHUB_ID", "0"},
 		{"invalid cookie secure", "COOKIE_SECURE", "sometimes"},
 		{"public HTTP URL", "PUBLIC_URL", "http://example.com"},

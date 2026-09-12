@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/config"
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
-	"github.com/jR4dh3y/oc-review-bot/internal/pool"
-	"github.com/jR4dh3y/oc-review-bot/internal/review"
-	"github.com/jR4dh3y/oc-review-bot/internal/runner"
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/config"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/pool"
+	"github.com/jR4dh3y/samik-bot/internal/review"
+	"github.com/jR4dh3y/samik-bot/internal/runner"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 	"modernc.org/sqlite"
 )
 

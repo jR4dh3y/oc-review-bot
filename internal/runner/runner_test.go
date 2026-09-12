@@ -375,7 +375,14 @@ func testBubblewrapPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Abs(path)
+	// The resolver rejects executables reached through a symlinked directory
+	// (for example /usr/sbin -> bin on merged-usr hosts), so hand it the
+	// canonical path.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(resolved)
 }
 
 // fakeRuntime creates a self-contained trusted runtime. Its scripts run with
@@ -441,8 +448,8 @@ set -eu
 [ "$HOME" = /home/reviewer ] || exit 86
 [ -z "${GITHUB_TOKEN+x}" ] || exit 87
 [ -z "${AWS_SECRET_ACCESS_KEY+x}" ] || exit 88
-[ -z "${OC_REVIEW_GIT_TOKEN+x}" ] || exit 89
-[ -z "${OC_REVIEW_ZEN_KEY+x}" ] || exit 90
+[ -z "${SAMIK_GIT_TOKEN+x}" ] || exit 89
+[ -z "${SAMIK_ZEN_KEY+x}" ] || exit 90
 [ -f "$XDG_DATA_HOME/opencode/auth.json" ] || exit 91
 [ -f "$XDG_CONFIG_HOME/opencode/opencode.json" ] || exit 92
 IFS= read -r auth < "$XDG_DATA_HOME/opencode/auth.json" || true
@@ -458,7 +465,7 @@ IFS= read -r config < "$XDG_CONFIG_HOME/opencode/opencode.json" || true
 [ ! -e AGENTS.md ] || exit 99
 [ ! -e nested/AGENTS.md ] || exit 100
 [ ! -e escaped-link ] || exit 101
-[ ! -e /tmp/oc-review-runner-host-secret ] || exit 102
+[ ! -e /tmp/samik-bot-runner-host-secret ] || exit 102
 [ ! -w review-diff.patch ] || exit 103
 	case " $* " in *' --auto '*) exit 104;; esac
 printf '%s\n' '{"type":"text","text":"Reviewed the diff."}'
@@ -485,7 +492,7 @@ set -eu
 [ -f "$PI_CODING_AGENT_DIR/settings.json" ] || exit 92
 [ -f "$PI_CODING_AGENT_DIR/auth.json" ] || exit 93
 IFS= read -r auth < "$PI_CODING_AGENT_DIR/auth.json" || true
-case "$auth" in *'"opencode"'*'"type":"api_key"'*'"key":"sk-test-9999"'*) ;; *) exit 94;; esac
+case "$auth" in *'"opencode"'*'"key":"sk-test-9999"'*'"type":"api_key"'*) ;; *) exit 94;; esac
 IFS= read -r settings < "$PI_CODING_AGENT_DIR/settings.json" || true
 case "$settings" in *'"defaultProjectTrust":"never"'*'"enableInstallTelemetry":false'*) ;; *) exit 95;; esac
 [ -f review-diff.patch ] || exit 96
@@ -493,7 +500,7 @@ case "$settings" in *'"defaultProjectTrust":"never"'*'"enableInstallTelemetry":f
 [ ! -e .git ] || exit 98
 [ ! -e AGENTS.md ] || exit 99
 [ ! -e nested/AGENTS.md ] || exit 100
-[ ! -e /tmp/oc-review-runner-host-secret ] || exit 101
+[ ! -e /tmp/samik-bot-runner-host-secret ] || exit 101
 [ ! -w review-diff.patch ] || exit 102
 case " $* " in *' --no-extensions '*) ;; *) exit 103;; esac
 case " $* " in *' --no-skills '*) ;; *) exit 104;; esac
@@ -673,7 +680,7 @@ func TestHardenCheckoutRemovesNestedInstructions(t *testing.T) {
 
 func TestRunEndToEndWithSandbox(t *testing.T) {
 	requireBubblewrap(t)
-	const hostSecret = "/tmp/oc-review-runner-host-secret"
+	const hostSecret = "/tmp/samik-bot-runner-host-secret"
 	if err := os.WriteFile(hostSecret, []byte("host-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +734,7 @@ else exit 1; fi
 
 func TestRunPiEndToEndWithSandbox(t *testing.T) {
 	requireBubblewrap(t)
-	const hostSecret = "/tmp/oc-review-runner-host-secret"
+	const hostSecret = "/tmp/samik-bot-runner-host-secret"
 	if err := os.WriteFile(hostSecret, []byte("host-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -945,7 +952,7 @@ done
 func TestRunKillsReviewerProcessGroupOnContextCancel(t *testing.T) {
 	requireBubblewrap(t)
 	remote, head := initRemote(t, nil)
-	marker := fmt.Sprintf("oc-review-runner-sleep-%d", time.Now().UnixNano())
+	marker := fmt.Sprintf("samik-bot-runner-sleep-%d", time.Now().UnixNano())
 	bin, runtimeDir := fakeRuntime(t, fmt.Sprintf(`
 case " $* " in *' %s '*) ;; *) exit 1;; esac
 /opt/opencode-runtime/bin/sleep 30 &

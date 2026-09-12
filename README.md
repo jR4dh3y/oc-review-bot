@@ -1,6 +1,6 @@
-# oc-review-bot
+# samik-bot
 
-Greptile/CodeRabbit-style PR review bot. Mention `@oc-review-bot` in a PR comment and it runs a
+Greptile/CodeRabbit-style PR review bot. Mention `@samik-bot` in a PR comment and it runs a
 reviewer coding agent against the PR diff using a pool of organization-authorized OpenCode Zen API
 keys, then posts one summary comment plus inline findings pinned to diff lines. The reviewer engine
 is configuration: the default is [OpenCode 2 beta](https://opencode.ai/v2/docs) (`opencode2`), or
@@ -118,7 +118,7 @@ mise exec -- make check
 mise exec -- make build
 ```
 
-The binary is written to `bin/oc-review-bot`. `web/dist` is the Vite production build embedded into
+The binary is written to `bin/samik-bot`. `web/dist` is the Vite production build embedded into
 the binary (`web/embed.go`, SPA fallback in `internal/server`). Go builds omit local source paths and
 VCS checkout state. For frontend development, keep `mise exec -- make run-local` running in one
 terminal, then run `mise exec -- make web-dev` in a second terminal; Vite listens on `:5173` and
@@ -132,7 +132,7 @@ GitHub OAuth App (dashboard login). They are separate registrations.
 ### 1. Create the GitHub App
 
 1. GitHub → Settings (your org/user) → Developer settings → GitHub Apps → New GitHub App.
-2. Name: `oc-review-bot` (must be globally unique; add a suffix if taken).
+2. Name: `samik-bot` (must be globally unique; add a suffix if taken).
 3. Homepage URL: your `PUBLIC_URL` (e.g. `https://bot.example.com`).
 4. Webhook URL: `https://<host>/webhooks/github`. Webhook secret: generate
    (`openssl rand -hex 32`) and save as `GITHUB_WEBHOOK_SECRET`.
@@ -172,7 +172,7 @@ set `BOT_USERNAME` to its mentionable login without a leading `@`.
 
 ### 4. Try it
 
-Open a PR on an installed repo, comment `@oc-review-bot review please`, expect a 👀 reaction,
+Open a PR on an installed repo, comment `@samik-bot review please`, expect a 👀 reaction,
 then a summary comment with a Mermaid sequence diagram followed by inline findings. Unregistered
 commenters get a register-here reply.
 
@@ -182,7 +182,7 @@ commenters get a register-here reply.
 |---|---|---|---|
 | `PORT` | no | `8080` | HTTP listen port |
 | `PUBLIC_URL` | no | `http://localhost:$PORT` | Absolute HTTP(S) URL without credentials, query, or fragment; HTTPS is required outside loopback development |
-| `DB_PATH` | no | `oc-review-bot.db` | SQLite database path; production must place its directory on persistent storage |
+| `DB_PATH` | no | `samik-bot.db` | SQLite database path; production must place its directory on persistent storage |
 | `GITHUB_APP_ID` | yes | — | GitHub App ID |
 | `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_PRIVATE_KEY_PATH` | yes (at least one) | — | Inline PEM or path; a non-empty file path takes precedence |
 | `GITHUB_WEBHOOK_SECRET` | yes | — | HMAC secret for `/webhooks/github` |
@@ -192,7 +192,7 @@ commenters get a register-here reply.
 | `REVIEWER_GITHUB_IDS` | no | empty | Additional comma-separated numeric GitHub user IDs that can request, but not administer, reviews |
 | `ALLOWED_GITHUB_INSTALLATION_IDS` | yes | — | Comma-separated numeric GitHub App installation IDs; each review target must match |
 | `ALLOWED_GITHUB_REPOSITORY_IDS` | yes | — | Comma-separated numeric GitHub repository IDs; each review target must match |
-| `BOT_USERNAME` | no | `oc-review-bot` | Valid GitHub login without `@`; mention trigger is case-insensitive |
+| `BOT_USERNAME` | no | `samik-bot` | Valid GitHub login without `@`; mention trigger is case-insensitive |
 | `ZEN_DEFAULT_MODEL` | yes | — | Current enabled `provider/model` identifier; initial value, overridable at `/admin/settings` |
 | `REVIEW_CONCURRENCY` | no | `2` | Worker pool size; must be at least 1 |
 | `REVIEW_TIMEOUT_MINUTES` | no | `20` | Per-review hard timeout; must be at least 1 |
@@ -230,7 +230,7 @@ governance, backups, and the single-replica deployment constraint.
 
 ## API (dashboard)
 
-All JSON, session cookie `oc_review_session`:
+All JSON, session cookie `samik_session`:
 
 - `GET /api/me` → `{id, login, avatar_url, is_admin}`
 - `GET /api/reviews` → last 50 `[{id, repo_full, pr_number, head_sha, requester_login, status, model, summary_md, error, summary_comment_id, created_at, findings_count}]`
@@ -240,7 +240,7 @@ All JSON, session cookie `oc_review_session`:
 
 ## Repo layout
 
-- `cmd/oc-review-bot/main.go` — wiring: config → App auth → store → key pool → engine → server
+- `cmd/samik-bot/main.go` — wiring: config → App auth → store → key pool → engine → server
 - `internal/config` — env parsing; `internal/store` — SQLite + migrations
   (`users`, `sessions`, `zen_keys`, `reviews`, `findings`, `nudges`, `settings`)
 - `internal/gh` — App JWT → installation token, REST (PR/files/diff/comments/reactions),
@@ -257,5 +257,5 @@ All JSON, session cookie `oc_review_session`:
 - `mise exec -- make check` runs Go formatting verification, `go vet`, Go tests, the frontend
   build, and a production binary build.
 - A live review can incur OpenCode Zen charges. Use an authorized funded test key, add it at
-  `/admin/keys`, comment `@oc-review-bot` on a test PR, and watch `/dashboard` go queued →
+  `/admin/keys`, comment `@samik-bot` on a test PR, and watch `/dashboard` go queued →
   running → done (or failed, with the cause on the review detail page).

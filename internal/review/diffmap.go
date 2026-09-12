@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
 )
 
 // DiffIndex knows which (path, side, line) triples are part of the PR diff,

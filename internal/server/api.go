@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/config"
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/config"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 const maxAPIJSONBytes = 64 << 10

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/seal"
+	"github.com/jR4dh3y/samik-bot/internal/seal"
 )
 
 func testStore(t *testing.T) *Store {

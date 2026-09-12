@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 const maxWebhookBytes = 2 << 20

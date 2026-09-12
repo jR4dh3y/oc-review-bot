@@ -12,8 +12,8 @@
 *.keystore
 *.pkcs12
 
-# Go (binary at repo root only — must not match cmd/oc-review-bot/)
-/oc-review-bot
+# Go (binary at repo root only — must not match cmd/samik-bot/)
+/samik-bot
 /bin/
 *.db
 *.db-journal

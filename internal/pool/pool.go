@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 // ErrEmpty is returned when no usable key exists.

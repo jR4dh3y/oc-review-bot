@@ -9,7 +9,7 @@ import {
 } from "@/lib/api";
 
 export const meQueryKey = ["me"] as const;
-const authChangeStorageKey = "oc-review-bot-auth-change";
+const authChangeStorageKey = "samik-bot-auth-change";
 
 type AuthChange = "logout" | "identity-changed";
 
@@ -56,7 +56,7 @@ export function publishAuthChange(type: AuthChange) {
 export function notifyAuthChange(type: AuthChange) {
   if (typeof window === "undefined") return;
   publishAuthChange(type);
-  window.dispatchEvent(new CustomEvent<AuthChange>("oc-review-bot:auth-change", { detail: type }));
+  window.dispatchEvent(new CustomEvent<AuthChange>("samik-bot:auth-change", { detail: type }));
 }
 
 export const meQueryOptions = () =>
@@ -158,14 +158,14 @@ export function useAuthSessionSync(userID: number | undefined, authError?: unkno
 
     window.addEventListener(authenticationRequiredEvent, onAuthenticationRequired);
     window.addEventListener("storage", onStorage);
-    window.addEventListener("oc-review-bot:auth-change", onLocalAuthChange);
+    window.addEventListener("samik-bot:auth-change", onLocalAuthChange);
     window.addEventListener("focus", revalidateCurrentUser);
     window.addEventListener("pageshow", revalidateCurrentUser);
     window.addEventListener("online", revalidateCurrentUser);
     return () => {
       window.removeEventListener(authenticationRequiredEvent, onAuthenticationRequired);
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("oc-review-bot:auth-change", onLocalAuthChange);
+      window.removeEventListener("samik-bot:auth-change", onLocalAuthChange);
       window.removeEventListener("focus", revalidateCurrentUser);
       window.removeEventListener("pageshow", revalidateCurrentUser);
       window.removeEventListener("online", revalidateCurrentUser);

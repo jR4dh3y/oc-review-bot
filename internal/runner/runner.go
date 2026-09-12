@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-import "github.com/jR4dh3y/oc-review-bot/internal/gh"
+import "github.com/jR4dh3y/samik-bot/internal/gh"
 
 // Reviewer engines executed by Run. The empty value means the default
 // OpenCode 2 integration so existing callers keep working.
@@ -184,7 +184,7 @@ func Run(ctx context.Context, o Options) (string, error) {
 		// The resolver's messages are operator-owned configuration failures.
 		return "", &AgentFailure{Err: err, Diagnostic: sanitizeDiagnostic(err.Error())}
 	}
-	tmp, err := os.MkdirTemp("", "oc-review-*")
+	tmp, err := os.MkdirTemp("", "samik-bot-*")
 	if err != nil {
 		return "", err
 	}
@@ -542,7 +542,7 @@ func checkoutGitHubArchiveOnce(ctx context.Context, destination, owner, reposito
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("User-Agent", "oc-review-bot")
+	request.Header.Set("User-Agent", "samik-bot")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
 	redirect, err := doArchiveRequest(ctx, client, request)
@@ -571,7 +571,7 @@ func checkoutGitHubArchiveOnce(ctx context.Context, destination, owner, reposito
 		return ErrCheckoutRejected
 	}
 	archiveRequest.Header.Set("Accept", "application/x-gzip")
-	archiveRequest.Header.Set("User-Agent", "oc-review-bot")
+	archiveRequest.Header.Set("User-Agent", "samik-bot")
 	archive, err := doArchiveRequest(ctx, client, archiveRequest)
 	if err != nil {
 		return err

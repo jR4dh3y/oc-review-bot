@@ -1,4 +1,4 @@
-// Command oc-review-bot runs the PR review bot: webhook server, review
+// Command samik-bot runs the PR review bot: webhook server, review
 // engine, and embedded dashboard.
 package main
 
@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/bot"
-	"github.com/jR4dh3y/oc-review-bot/internal/config"
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
-	"github.com/jR4dh3y/oc-review-bot/internal/pool"
-	"github.com/jR4dh3y/oc-review-bot/internal/runner"
-	"github.com/jR4dh3y/oc-review-bot/internal/seal"
-	"github.com/jR4dh3y/oc-review-bot/internal/server"
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
-	webpkg "github.com/jR4dh3y/oc-review-bot/web"
+	"github.com/jR4dh3y/samik-bot/internal/bot"
+	"github.com/jR4dh3y/samik-bot/internal/config"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/pool"
+	"github.com/jR4dh3y/samik-bot/internal/runner"
+	"github.com/jR4dh3y/samik-bot/internal/seal"
+	"github.com/jR4dh3y/samik-bot/internal/server"
+	"github.com/jR4dh3y/samik-bot/internal/store"
+	webpkg "github.com/jR4dh3y/samik-bot/web"
 )
 
 func main() {

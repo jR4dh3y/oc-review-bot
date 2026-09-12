@@ -46,7 +46,7 @@ function RootLayout() {
             className="order-1 flex shrink-0 items-center gap-2 rounded-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950 focus-visible:ring-offset-2"
           >
             <BotMessageSquare className="size-5" aria-hidden="true" />
-            oc-review-bot
+            samik-bot
           </Link>
           {me && (
             <nav

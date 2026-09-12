@@ -760,7 +760,7 @@ func (s *Store) PrepareReviewPublication(id, generation int64, plan PublicationP
 }
 
 func publicationMarker(token string) string {
-	return fmt.Sprintf("<!-- oc-review-bot:v2:%s -->", token)
+	return fmt.Sprintf("<!-- samik-bot:v2:%s -->", token)
 }
 
 func withMarker(body, marker string) string {
@@ -1598,5 +1598,5 @@ func requireNudgeLeaseTx(tx *sql.Tx, id, generation int64, owner string, fence i
 
 // NudgeMarker is an opaque marker used to reconcile an ambiguous GitHub POST.
 func NudgeMarker(token string) string {
-	return fmt.Sprintf("<!-- oc-review-bot:v1:nudge:%s -->", token)
+	return fmt.Sprintf("<!-- samik-bot:v1:nudge:%s -->", token)
 }

@@ -210,7 +210,7 @@ func TestInstallationTokenCaches(t *testing.T) {
 }
 
 func TestFindCommentMarkerRequiresBotAuthorAndExactMarker(t *testing.T) {
-	const marker = "<!-- oc-review-bot:v2:opaque-marker -->"
+	const marker = "<!-- samik-bot:v2:opaque-marker -->"
 	paths := []string{
 		"/repos/o/r/issues/7/comments",
 		"/repos/o/r/pulls/7/comments",
@@ -247,7 +247,7 @@ func TestFindCommentMarkerRequiresBotAuthorAndExactMarker(t *testing.T) {
 }
 
 func TestFindCommentMarkerRejectsAttackerOnlyAndDuplicateMarkers(t *testing.T) {
-	const marker = "<!-- oc-review-bot:v2:opaque-marker -->"
+	const marker = "<!-- samik-bot:v2:opaque-marker -->"
 	a := testApp(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"id": 900, "body": marker, "user": map[string]any{"id": 999}},

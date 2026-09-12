@@ -21,12 +21,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/bot"
-	"github.com/jR4dh3y/oc-review-bot/internal/config"
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
-	"github.com/jR4dh3y/oc-review-bot/internal/pool"
-	"github.com/jR4dh3y/oc-review-bot/internal/seal"
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/bot"
+	"github.com/jR4dh3y/samik-bot/internal/config"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/pool"
+	"github.com/jR4dh3y/samik-bot/internal/seal"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 type testDeps struct {
@@ -99,7 +99,7 @@ func setup(t *testing.T, ghHandler http.Handler) (*Server, *testDeps, *int) {
 		ReviewerGitHubIDs: []int64{testRequesterID},
 		InstallationIDs:   []int64{testInstallationID},
 		RepositoryIDs:     []int64{testRepositoryID},
-		BotUsername:       "oc-review-bot",
+		BotUsername:       "samik-bot",
 		DefaultModel:      "opencode/big-pickle",
 	}
 	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
@@ -238,7 +238,7 @@ func TestUnregisteredUserQueuesNudgeWithoutSynchronousComment(t *testing.T) {
 	s, deps, calls := setup(t, nil)
 	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
 
-	rec := postWebhook(t, h, "issue_comment", commentPayload("created", "@oc-review-bot review", "User", true))
+	rec := postWebhook(t, h, "issue_comment", commentPayload("created", "@samik-bot review", "User", true))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -251,7 +251,7 @@ func TestUnregisteredUserQueuesNudgeWithoutSynchronousComment(t *testing.T) {
 	}
 
 	// A distinct delivery for the same requester and PR cannot create another nudge.
-	rec = postWebhook(t, h, "issue_comment", commentPayload("created", "@oc-review-bot review", "User", true))
+	rec = postWebhook(t, h, "issue_comment", commentPayload("created", "@samik-bot review", "User", true))
 	if rec.Code != http.StatusOK || *calls != 0 {
 		t.Fatalf("duplicate nudge queued a synchronous comment: code=%d calls=%d", rec.Code, *calls)
 	}
@@ -277,7 +277,7 @@ func TestRegisteredUserEnqueuesReview(t *testing.T) {
 	}
 	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
 
-	rec := postWebhook(t, h, "issue_comment", commentPayload("created", "please @OC-REVIEW-BOT review this", "User", true))
+	rec := postWebhook(t, h, "issue_comment", commentPayload("created", "please @SAMIK-BOT review this", "User", true))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -292,7 +292,7 @@ func TestRegisteredUserEnqueuesReview(t *testing.T) {
 	}
 
 	// Duplicate mention while queued is ignored.
-	rec = postWebhook(t, h, "issue_comment", commentPayload("created", "@oc-review-bot again", "User", true))
+	rec = postWebhook(t, h, "issue_comment", commentPayload("created", "@samik-bot again", "User", true))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dedupe code = %d", rec.Code)
 	}
@@ -311,7 +311,7 @@ func TestWebhookDeliveryDoesNotReplayCompletedReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
-	payload := commentPayload("created", "@oc-review-bot review", "User", true)
+	payload := commentPayload("created", "@samik-bot review", "User", true)
 
 	rec := postWebhookWithDelivery(t, h, "issue_comment", payload, "delivery-1")
 	if rec.Code != http.StatusAccepted {
@@ -364,7 +364,7 @@ func TestWebhookDeliveryDoesNotReplayCompletedReview(t *testing.T) {
 func TestWebhookDeliveryCannotStartReviewAfterRegistration(t *testing.T) {
 	s, deps, _ := setup(t, nil)
 	h := New(s.cfg, s.st, s.app, s.engine, s.log, embed.FS{})
-	payload := commentPayload("created", "@oc-review-bot review", "User", true)
+	payload := commentPayload("created", "@samik-bot review", "User", true)
 
 	rec := postWebhookWithDelivery(t, h, "issue_comment", payload, "delivery-before-registration")
 	if rec.Code != http.StatusOK {
@@ -394,9 +394,9 @@ func TestIgnoresNonMentionsAndBots(t *testing.T) {
 		payload []byte
 	}{
 		{"no mention", commentPayload("created", "looks good, ship it", "User", true)},
-		{"bot sender", commentPayload("created", "@oc-review-bot review", "Bot", true)},
-		{"not a PR", commentPayload("created", "@oc-review-bot review", "User", false)},
-		{"deleted action", commentPayload("deleted", "@oc-review-bot review", "User", true)},
+		{"bot sender", commentPayload("created", "@samik-bot review", "Bot", true)},
+		{"not a PR", commentPayload("created", "@samik-bot review", "User", false)},
+		{"deleted action", commentPayload("deleted", "@samik-bot review", "User", true)},
 	} {
 		rec := postWebhook(t, h, "issue_comment", tc.payload)
 		if rec.Code != http.StatusOK {
@@ -431,7 +431,7 @@ func TestWebhookIgnoresDisallowedTargetsWithoutPersistingWork(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := postWebhookWithDelivery(t, h, "issue_comment",
-				commentPayloadForTarget("created", "@oc-review-bot review", "User", true, tc.installationID, tc.repositoryID),
+				commentPayloadForTarget("created", "@samik-bot review", "User", true, tc.installationID, tc.repositoryID),
 				"disallowed-"+tc.name)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
@@ -466,7 +466,7 @@ func TestAdminAPIKeysRoundTrip(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
 		tok := "tok-" + u.Login
 		s.st.CreateSession(u.ID, tok, time.Hour)
-		req.AddCookie(&http.Cookie{Name: "oc_review_session", Value: tok})
+		req.AddCookie(&http.Cookie{Name: "samik_session", Value: tok})
 		return httptest.NewRecorder(), req
 	}
 
@@ -484,7 +484,7 @@ func TestAdminAPIKeysRoundTrip(t *testing.T) {
 	addReq.Header.Set("Content-Type", "application/json")
 	tok := "tok-root"
 	s.st.CreateSession(admin.ID, tok, time.Hour)
-	addReq.AddCookie(&http.Cookie{Name: "oc_review_session", Value: tok})
+	addReq.AddCookie(&http.Cookie{Name: "samik_session", Value: tok})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, addReq)
 	if rec.Code != http.StatusCreated {
@@ -492,7 +492,7 @@ func TestAdminAPIKeysRoundTrip(t *testing.T) {
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
-	getReq.AddCookie(&http.Cookie{Name: "oc_review_session", Value: tok})
+	getReq.AddCookie(&http.Cookie{Name: "samik_session", Value: tok})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, getReq)
 	var keys []map[string]any

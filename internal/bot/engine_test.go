@@ -19,12 +19,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jR4dh3y/oc-review-bot/internal/config"
-	"github.com/jR4dh3y/oc-review-bot/internal/gh"
-	"github.com/jR4dh3y/oc-review-bot/internal/pool"
-	"github.com/jR4dh3y/oc-review-bot/internal/runner"
-	"github.com/jR4dh3y/oc-review-bot/internal/seal"
-	"github.com/jR4dh3y/oc-review-bot/internal/store"
+	"github.com/jR4dh3y/samik-bot/internal/config"
+	"github.com/jR4dh3y/samik-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/pool"
+	"github.com/jR4dh3y/samik-bot/internal/runner"
+	"github.com/jR4dh3y/samik-bot/internal/seal"
+	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
 func TestStartRecoversInterruptedReviewWithNewDurableClaim(t *testing.T) {

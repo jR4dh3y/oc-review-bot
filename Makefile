@@ -6,7 +6,7 @@ PI_BIN ?= pi
 
 WEB_DIR := web
 BIN_DIR := bin
-BINARY := $(BIN_DIR)/oc-review-bot
+BINARY := $(BIN_DIR)/samik-bot
 
 .DEFAULT_GOAL := help
 
@@ -18,7 +18,7 @@ help:
 		'  make opencode-check  Verify the installed OpenCode 2 beta CLI' \
 		'  make pi-check    Verify the installed pi coding agent CLI' \
 		'  make check       Verify formatting, Go code, frontend, and binary build' \
-		'  make build       Build the embedded dashboard and bin/oc-review-bot' \
+		'  make build       Build the embedded dashboard and bin/samik-bot' \
 		'  make run         Run the service from source with injected environment' \
 		'  make run-local   Load .env for local development, then run the service' \
 		'  make web-dev     Start Vite on :5173 with API proxying to :8080' \
@@ -66,16 +66,16 @@ web-build:
 
 build: web-build
 	mkdir -p $(BIN_DIR)
-	$(GO) build -trimpath -buildvcs=false -o $(BINARY) ./cmd/oc-review-bot
+	$(GO) build -trimpath -buildvcs=false -o $(BINARY) ./cmd/samik-bot
 
 check: fmt-check vet test build
 
 run: web-build
-	$(GO) run ./cmd/oc-review-bot
+	$(GO) run ./cmd/samik-bot
 
 run-local: web-build
 	@test -f .env || { printf '%s\n' '.env not found; copy .env.example and fill required values.'; exit 1; }
-	@set -a; . ./.env; set +a; $(GO) run ./cmd/oc-review-bot
+	@set -a; . ./.env; set +a; $(GO) run ./cmd/samik-bot
 
 web-dev:
 	$(BUN) run --cwd $(WEB_DIR) dev --host 0.0.0.0

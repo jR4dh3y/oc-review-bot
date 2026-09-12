@@ -85,7 +85,7 @@ func Preflight(bin, runtimeDir, bubblewrapBin, engine string) error {
 		return err
 	}
 
-	tmp, err := os.MkdirTemp("", "oc-review-sandbox-check-*")
+	tmp, err := os.MkdirTemp("", "samik-bot-sandbox-check-*")
 	if err != nil {
 		return fmt.Errorf("%w: create capability probe", ErrSandboxUnavailable)
 	}
@@ -417,9 +417,11 @@ func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, 
 		"--ro-bind", paths.runtimeDir, sandboxRoot(paths.engine),
 	}
 	// The reviewer executables are dynamically linked, but they do not need
-	// broad host executable directories. /lib and /lib64 provide only the
-	// loader and shared libraries on supported Linux hosts.
-	for _, path := range []string{"/lib", "/lib64"} {
+	// broad host executable directories. Bind every canonical library
+	// directory: glibc's compiled-in search path is /usr/lib on merged-usr
+	// hosts (Arch), so mounting only /lib and /lib64 satisfies the kernel's
+	// interpreter lookup but not the loader's dependency search.
+	for _, path := range []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64"} {
 		if _, err := os.Lstat(path); err == nil {
 			args = append(args, "--ro-bind", path, path)
 		}
