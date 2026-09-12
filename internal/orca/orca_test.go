@@ -48,8 +48,10 @@ func TestConnectURLMintsPKCEAndReferral(t *testing.T) {
 		t.Fatalf("app_name/ref = %q / %q", query.Get("app_name"), query.Get("ref"))
 	}
 	state := query.Get("state")
-	if len(state) < 32 || !strings.ContainsFunc(state, func(r rune) bool { return r == '-' || r == '_' }) {
-		t.Fatalf("state %q is not base64url with sufficient entropy", state)
+	// 43 base64url characters encode 256 bits, which is the entropy that
+	// makes the state unguessable.
+	if len(state) != 43 {
+		t.Fatalf("state %q has length %d, want 43 base64url characters", state, len(state))
 	}
 	// The challenge must be the S256 digest of the verifier held server-side.
 	pending := s.pending[state]
