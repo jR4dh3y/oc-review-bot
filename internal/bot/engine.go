@@ -500,6 +500,7 @@ func (e *Engine) claimAndProcessReview(ctx context.Context) bool {
 		e.log.Error("claim queued review", "err", err)
 		return false
 	}
+	e.recordEvent(r.ID, "prepare", "Claimed for processing")
 	ctx, cancel := context.WithTimeout(ctx, e.reviewTimeout())
 	e.processClaimedReview(ctx, r)
 	cancel()
@@ -539,6 +540,39 @@ func (e *Engine) reviewTimeout() time.Duration {
 	return 20 * time.Minute
 }
 
+// recordEvent best-effort persists a dashboard progress event. A failure only
+// loses observability and must never affect the review pipeline.
+func (e *Engine) recordEvent(reviewID int64, kind, message string) {
+	if err := e.st.AppendReviewEvent(reviewID, kind, message); err != nil {
+		e.log.Warn("record review event", "review", reviewID, "kind", kind, "err", err)
+	}
+}
+
+// runnerProgress maps runner lifecycle stages to dashboard events. Unknown
+// stages fall back to the raw stage name and must never be emitted.
+func (e *Engine) runnerProgress(reviewID int64) func(stage string) {
+	return func(stage string) {
+		kind, message := "prepare", stage
+		switch stage {
+		case runner.StageCheckoutStart:
+			kind, message = "checkout", "Fetching the repository snapshot"
+		case runner.StageCheckoutRetry:
+			kind, message = "checkout", "Retrying the repository snapshot"
+		case runner.StageCheckoutDone:
+			kind, message = "checkout", "Repository snapshot ready"
+		case runner.StageSandboxReady:
+			kind, message = "sandbox", "Sandbox boundary established"
+		case runner.StageSandboxSealed:
+			kind, message = "sandbox", "Sandbox sealed with isolated credentials"
+		case runner.StageAgentStart:
+			kind, message = "agent_started", "Reviewer agent started"
+		case runner.StageAgentDone:
+			kind, message = "agent_finished", "Reviewer agent finished"
+		}
+		e.recordEvent(reviewID, kind, message)
+	}
+}
+
 // processOne is retained as a focused test helper. Production workers claim
 // directly from the durable queue instead of receiving an in-memory ID.
 func (e *Engine) processOne(ctx context.Context, id int64) {
@@ -568,7 +602,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	log := e.log.With("review", r.ID, "repo", r.RepoFull, "pr", r.PRNumber)
 	if !e.cfg.CanRequestReview(r.RequesterGitHubID, r.InstallationID, r.RepositoryID) {
-		if e.failReview(r, log, reviewAccessRevokedMessage) {
+		if e.failReview(r, log, "access_revoked", reviewAccessRevokedMessage) {
 			e.signalReviewFailure(ctx, "", r, log)
 		}
 		return
@@ -582,6 +616,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
+	e.recordEvent(r.ID, "prepare", "Fetched the GitHub installation token")
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
@@ -617,6 +652,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	}
 	r.HeadSHA = currentPR.Head.SHA
 	r.HeadRevision = currentRevision
+	e.recordEvent(r.ID, "prepare", fmt.Sprintf("Verified the pull-request head (sha %.7s)", currentPR.Head.SHA))
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
@@ -668,6 +704,7 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
+	e.recordEvent(r.ID, "prepare", fmt.Sprintf("Loaded the changed-file list (%d files)", len(files)))
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
@@ -680,10 +717,11 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
+	e.recordEvent(r.ID, "prepare", "Fetched the pull-request diff")
 
 	model := e.st.GetSetting("model", e.cfg.DefaultModel)
 	if !config.ValidModel(model) {
-		if e.failReview(r, log, invalidModelMessage) {
+		if e.failReview(r, log, "invalid_model", invalidModelMessage) {
 			e.signalReviewFailure(ctx, token, r, log)
 		}
 		return
@@ -718,10 +756,12 @@ func (e *Engine) processClaimedReview(ctx context.Context, r *store.Review) {
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
-	if err := e.preparePublication(r, currentPR, review.NewDiffIndex(files), review.ExtractReview(agentOut)); err != nil {
+	keptFindings, err := e.preparePublication(r, currentPR, review.NewDiffIndex(files), review.ExtractReview(agentOut))
+	if err != nil {
 		e.handleReviewError(ctx, token, r, log, err)
 		return
 	}
+	e.recordEvent(r.ID, "publish", fmt.Sprintf("Prepared the summary and %d inline findings for posting", keptFindings))
 	if err := e.reviewSideEffectError(ctx, r); err != nil {
 		return
 	}
@@ -757,6 +797,7 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 		if err := e.st.SetReviewExecution(r.ID, r.ExecutionGeneration, model, key.ID, r.ServiceLeaseOwner, r.ClaimFence); err != nil {
 			return nil, "", fmt.Errorf("record review execution: %w", err)
 		}
+		e.recordEvent(r.ID, "prepare", fmt.Sprintf("Acquired Zen credential %q", key.Label))
 		if err := e.reviewSideEffectError(ctx, r); err != nil {
 			return nil, "", err
 		}
@@ -782,6 +823,7 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 			APIKey:        key.Secret,
 			Diff:          diff,
 			Prompt:        review.BuildPrompt("review-diff.patch"),
+			OnProgress:    e.runnerProgress(r.ID),
 		})
 		if runErr == nil {
 			return key, out, nil
@@ -801,7 +843,9 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 	return nil, "", lastErr
 }
 
-func (e *Engine) preparePublication(r *store.Review, pr *gh.PR, idx *review.DiffIndex, result review.ReviewResult) error {
+// preparePublication persists the publication plan and returns the number of
+// inline findings kept in it.
+func (e *Engine) preparePublication(r *store.Review, pr *gh.PR, idx *review.DiffIndex, result review.ReviewResult) (int, error) {
 	filtered := review.ReviewResult{
 		SummaryMD:       result.SummaryMD,
 		SequenceDiagram: result.SequenceDiagram,
@@ -825,7 +869,7 @@ func (e *Engine) preparePublication(r *store.Review, pr *gh.PR, idx *review.Diff
 		})
 	}
 	plan.SummaryBodyMD = review.RenderSummaryComment(filtered, e.cfg.BotUsername, r.Model)
-	return e.st.PrepareReviewPublication(r.ID, r.ExecutionGeneration, plan, r.ServiceLeaseOwner, r.ClaimFence)
+	return len(plan.Findings), e.st.PrepareReviewPublication(r.ID, r.ExecutionGeneration, plan, r.ServiceLeaseOwner, r.ClaimFence)
 }
 
 // publishPrepared reconciles every opaque marker before issuing a write. A
@@ -1035,6 +1079,7 @@ func (e *Engine) finishPublishedReview(ctx context.Context, token string, r *sto
 	if err := e.reviewCompletionSideEffectError(ctx, r); err != nil {
 		return
 	}
+	e.recordEvent(r.ID, "completed", "Review completed")
 	if err := e.app.ReactToIssueComment(ctx, token, r.RepoFull, r.TriggerCommentID, "rocket"); err != nil {
 		log.Warn("acknowledge completed review", "cause", "github")
 	}
@@ -1065,7 +1110,7 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 		return
 	}
 	if errors.Is(err, errReviewAccess) {
-		if e.failReview(r, log, reviewAccessRevokedMessage) {
+		if e.failReview(r, log, "access_revoked", reviewAccessRevokedMessage) {
 			e.signalReviewFailure(ctx, token, r, log)
 		}
 		return
@@ -1086,7 +1131,9 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 			log.Error("requeue review", "err", requeueErr)
 			return
 		}
-		log.Warn("review delivery deferred", "attempt", r.ExecutionGeneration, "cause", reviewErrorClass(err, e.cfg.ReviewEngine))
+		cause := reviewErrorClass(err, e.cfg.ReviewEngine)
+		log.Warn("review delivery deferred", "attempt", r.ExecutionGeneration, "cause", cause)
+		e.recordEvent(r.ID, "retry", fmt.Sprintf("Transient failure (%s); requeued for retry", cause))
 		e.signal()
 		return
 	}
@@ -1111,7 +1158,8 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 		attrs = append(attrs, "github_status", httpErr.StatusCode, "github_endpoint", httpErr.Method+" "+httpErr.Path)
 	}
 	log.Error("review failed", attrs...)
-	if e.failReview(r, log, fmt.Sprintf("%s (cause: %s)", reviewFailureMessage, reviewErrorClass(err, e.cfg.ReviewEngine))) {
+	cause := reviewErrorClass(err, e.cfg.ReviewEngine)
+	if e.failReview(r, log, cause, fmt.Sprintf("%s (cause: %s)", reviewFailureMessage, cause)) {
 		e.signalReviewFailure(ctx, token, r, log)
 	}
 }
@@ -1194,7 +1242,7 @@ func reviewErrorClass(err error, engine string) string {
 
 func (e *Engine) failHeadChanged(r *store.Review, log *slog.Logger) {
 	log.Info("review skipped because pull request head changed")
-	e.failReview(r, log, headChangedMessage)
+	e.failReview(r, log, "head_changed", headChangedMessage)
 }
 
 // uncertainDeliveryStatus reports whether a publication may already carry a
@@ -1285,7 +1333,7 @@ func (e *Engine) reviewCompletionSideEffectError(ctx context.Context, r *store.R
 
 // failReview records the terminal failure for the current execution
 // generation and reports whether this worker's update landed.
-func (e *Engine) failReview(r *store.Review, log *slog.Logger, message string) bool {
+func (e *Engine) failReview(r *store.Review, log *slog.Logger, cause, message string) bool {
 	if !e.serviceLeaseOwned() {
 		log.Info("service lease lost before failure update")
 		return false
@@ -1298,6 +1346,7 @@ func (e *Engine) failReview(r *store.Review, log *slog.Logger, message string) b
 		log.Error("mark review failed", "err", err)
 		return false
 	}
+	e.recordEvent(r.ID, "failed", fmt.Sprintf("Review failed (%s)", cause))
 	return true
 }
 
