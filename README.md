@@ -143,6 +143,16 @@ environment and the key never enters the child environment or the provider block
   `PI_CODING_AGENT_DIR` (`baseUrl` plus the OpenAI-compatible chat-completions API), alongside the
   same provider-keyed auth-store credential.
 
+### OrcaRouter partner dashboard
+
+`/admin/partner` (administrators) collects the deployment's partner integration in one place: the
+referral link and code, the directory listing entry, and a **Connect with OrcaRouter** flow. The
+connect button mints a PKCE authorization URL at `/orca/connect-url` (the endpoint the official
+drop-in button script expects), sends the operator to OrcaRouter's consent screen with the
+referral code attached, and `/auth/orca/callback` exchanges the returned code server-side — the
+key never passes through the browser — and stores it encrypted in the same gateway pool. Set
+`ORCAROUTER_REFERRAL_CODE` to override the baked-in referral code.
+
 Build and verify the frontend plus single binary:
 
 ```bash
@@ -226,6 +236,7 @@ commenters get a register-here reply.
 | `ALLOWED_GITHUB_REPOSITORY_IDS` | yes | — | Comma-separated numeric GitHub repository IDs; each review target must match |
 | `BOT_USERNAME` | no | `samik-bot` | Valid GitHub login without `@`; mention trigger is case-insensitive |
 | `ZEN_DEFAULT_MODEL` | yes | — | Current enabled `provider/model` identifier; initial value, overridable at `/admin/settings`. The provider prefix selects the gateway: `opencode/…` (OpenCode Zen, the default) or `orcarouter/…` (OrcaRouter); the key pool must match that gateway |
+| `ORCAROUTER_REFERRAL_CODE` | no | deployment's code | Partner referral code baked into the OrcaRouter connect URLs minted at `/orca/connect-url` and shown at `/admin/partner` |
 | `REVIEW_CONCURRENCY` | no | `2` | Worker pool size; must be at least 1 |
 | `REVIEW_TIMEOUT_MINUTES` | no | `20` | Per-review hard timeout; must be at least 1 |
 | `ZEN_COOLDOWN_MINUTES` | no | `60` | Cooldown after a gateway quota/rate-limit error; must be at least 1 |

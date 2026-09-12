@@ -39,6 +39,7 @@ type Config struct {
 	BotUsername         string
 	CookieSecure        bool
 	DefaultModel        string
+	OrcaReferralCode    string // partner referral code baked into OrcaRouter connect URLs
 	ZenCooldown         time.Duration
 	ReviewConcurrency   int
 	ReviewTimeout       time.Duration
@@ -69,6 +70,7 @@ func Load() (*Config, error) {
 		SessionSecret:      os.Getenv("SESSION_SECRET"),
 		BotUsername:        env("BOT_USERNAME", "samik-bot"),
 		DefaultModel:       strings.TrimSpace(os.Getenv("ZEN_DEFAULT_MODEL")),
+		OrcaReferralCode:   strings.TrimSpace(os.Getenv("ORCAROUTER_REFERRAL_CODE")),
 		ReviewEngine:       strings.TrimSpace(env("REVIEW_ENGINE", EngineOpenCode2)),
 		OpenCodeBin:        strings.TrimSpace(env("OPENCODE_BIN", "opencode2")),
 		OpenCodeRuntimeDir: strings.TrimSpace(os.Getenv("OPENCODE_RUNTIME_DIR")),

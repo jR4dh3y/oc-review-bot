@@ -21,6 +21,7 @@ import (
 	"github.com/jR4dh3y/samik-bot/internal/bot"
 	"github.com/jR4dh3y/samik-bot/internal/config"
 	"github.com/jR4dh3y/samik-bot/internal/gh"
+	"github.com/jR4dh3y/samik-bot/internal/orca"
 	"github.com/jR4dh3y/samik-bot/internal/store"
 )
 
@@ -31,17 +32,26 @@ type Server struct {
 	app    *gh.App
 	engine *bot.Engine
 	log    *slog.Logger
+	orca   *orca.Service
 }
 
 // New builds the HTTP router. spa is the embedded web/dist tree (nil in dev).
 func New(cfg *config.Config, st *store.Store, app *gh.App, eng *bot.Engine, log *slog.Logger, spa embed.FS) http.Handler {
-	s := &Server{cfg: cfg, st: st, app: app, engine: eng, log: log}
+	s := &Server{
+		cfg:    cfg,
+		st:     st,
+		app:    app,
+		engine: eng,
+		log:    log,
+		orca:   orca.NewService(cfg.BotUsername, cfg.PublicURL+"/auth/orca/callback", cfg.OrcaReferralCode),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /webhooks/github", s.handleWebhook)
 	mux.HandleFunc("GET /auth/github/login", s.handleOAuthLogin)
 	mux.HandleFunc("GET /auth/github/callback", s.handleOAuthCallback)
+	mux.HandleFunc("GET /auth/orca/callback", s.handleOrcaCallback)
 	mux.HandleFunc("POST /auth/logout", s.withTrustedOrigin(s.handleLogout))
 	mux.HandleFunc("GET /api/meta", s.handleMeta)
 	mux.HandleFunc("GET /api/me", s.withUser(s.handleMe))
@@ -53,7 +63,8 @@ func New(cfg *config.Config, st *store.Store, app *gh.App, eng *bot.Engine, log 
 	mux.HandleFunc("DELETE /api/admin/keys/{id}", s.withAdminMutation(s.handleDeleteKey))
 	mux.HandleFunc("GET /api/admin/settings", s.withAdmin(s.handleGetSettings))
 	mux.HandleFunc("POST /api/admin/settings", s.withAdminMutation(s.handleSetSettings))
-
+	mux.HandleFunc("GET /api/admin/partner", s.withAdmin(s.handlePartnerInfo))
+	mux.HandleFunc("GET /orca/connect-url", s.withAdmin(s.handleOrcaConnectURL))
 	mux.Handle("GET /", spaHandler(spa))
 	return withLogging(log, mux)
 }
