@@ -94,14 +94,20 @@ so you can switch back with one env var. Both engines use the same Zen key pool 
 Stage a pi runtime directory the same way as the OpenCode runtime: an absolute trusted directory
 (mounted read-only, no symlinked/group-writable/world-writable entries) containing `bin/pi` and
 its dependencies. pi is a Node CLI, so the sandbox tree must also contain the `node` executable —
-the sandbox has no host `/usr/bin/env`, so `bin/pi` must use an **absolute** shebang such as
-`#!/opt/pi-runtime/bin/node`. Example staging from an npm install:
+the sandbox has no host `/usr/bin/env`, so `bin/pi` must be a launcher with an absolute shebang
+such as `#!/opt/pi-runtime/bin/sh`. The staged tree must keep the npm package layout (a
+`package.json` above `dist/`), because pi resolves its built-in themes and templates relative to
+the package root. Example staging from an npm install:
 
 ```bash
-npm pack @earendil-works/pi-coding-agent            # then unpack the tarball into /opt/pi-runtime/lib
+npm pack @earendil-works/pi-coding-agent        # then unpack into /opt/pi-runtime/lib/pi-coding-agent
+cp -r "$SRC/node_modules/@earendil-works/chord" /opt/pi-runtime/lib/pi-coding-agent/node_modules/@earendil-works/
 cp "$(command -v node)" /opt/pi-runtime/bin/node    # copy, never symlink
-sed '1s|^#!/usr/bin/env node|#!/opt/pi-runtime/bin/node|' \
-  /opt/pi-runtime/lib/package/dist/bundle/cli.js > /opt/pi-runtime/bin/pi
+cp "$(command -v bash)" /opt/pi-runtime/bin/sh      # copy, never symlink
+cat > /opt/pi-runtime/bin/pi <<'EOF'
+#!/opt/pi-runtime/bin/sh
+exec /opt/pi-runtime/bin/node /opt/pi-runtime/lib/pi-coding-agent/dist/bundle/cli.js "$@"
+EOF
 chmod 0755 /opt/pi-runtime/bin/pi
 PI_BIN=/opt/pi-runtime/bin/pi mise exec -- make pi-check
 ```

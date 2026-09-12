@@ -313,6 +313,50 @@ func TestCheckoutRefetchesCorruptArchive(t *testing.T) {
 	}
 }
 
+// githubStyleTarball mirrors real codeload archives, which open with a pax
+// global header entry before the repository root directory.
+func githubStyleTarball(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	global := map[string]string{"comment": strings.Repeat("a", 40)}
+	if err := tw.WriteHeader(&tar.Header{Name: "pax_global_header", Typeflag: tar.TypeXGlobalHeader, PAXRecords: global}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "r-aaa/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("hello")
+	if err := tw.WriteHeader(&tar.Header{Name: "r-aaa/f.txt", Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestExtractGitHubArchiveAcceptsGlobalHeaderEntry(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "checkout")
+	if err := extractGitHubArchive(context.Background(), bytes.NewReader(githubStyleTarball(t)), dest); err != nil {
+		t.Fatalf("github-style archive rejected: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("extracted = %q, want %q", got, "hello")
+	}
+}
+
 func TestExtractTextPlainFallback(t *testing.T) {
 	plain := "just text, no json"
 	if got := ExtractText(plain); got != plain {

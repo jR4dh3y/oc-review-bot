@@ -678,6 +678,11 @@ func extractGitHubArchive(ctx context.Context, body io.Reader, destination strin
 		if err != nil {
 			return archiveReadError(ctx, err)
 		}
+		// GitHub tarballs open with a pax global header entry; it carries no
+		// file content and must not count as an archive root.
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			continue
+		}
 		entries++
 		if entries > maxCheckoutFiles {
 			return ErrCheckoutTooLarge
