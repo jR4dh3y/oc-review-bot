@@ -302,6 +302,21 @@ func TestRenderSummaryComment(t *testing.T) {
 	}
 }
 
+func TestSummaryFooterNamesTheModelGateway(t *testing.T) {
+	r := ExtractReview(sampleAgentOutput)
+	zen := RenderSummaryComment(r, "samik-bot", "opencode/big-pickle")
+	if !strings.Contains(zen, "(OpenCode Zen)") {
+		t.Fatalf("Zen summary footer must name OpenCode Zen:\n%s", zen)
+	}
+	orca := RenderSummaryComment(r, "samik-bot", "orcarouter/auto")
+	if !strings.Contains(orca, "(OrcaRouter)") || strings.Contains(orca, "OpenCode Zen") {
+		t.Fatalf("OrcaRouter summary footer must name OrcaRouter only:\n%s", orca)
+	}
+	if GatewayName("orcarouter/auto") != "OrcaRouter" || GatewayName("openai/gpt-5") != "OpenCode Zen" {
+		t.Fatalf("GatewayName rule = %q / %q", GatewayName("orcarouter/auto"), GatewayName("openai/gpt-5"))
+	}
+}
+
 func TestNormalizeSequenceDiagramStripsFences(t *testing.T) {
 	out := ExtractReview("```json\n{" +
 		`"summary":"s","sequence_diagram":"` +

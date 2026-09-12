@@ -20,7 +20,7 @@ function Landing() {
       <Card>
         <CardHeader>
           <CardTitle as="h1" className="text-2xl">
-            GitHub pull-request reviews with OpenCode Zen
+            GitHub pull-request reviews with your model gateway
           </CardTitle>
           <CardDescription>
             Sign in once with GitHub, then mention <BotMention /> on a pull request in

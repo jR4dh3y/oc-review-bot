@@ -81,8 +81,11 @@ func (f *sandboxFiles) extraFiles() []*os.File {
 }
 
 // Preflight verifies that the configured runtime can be launched inside the
-// same Bubblewrap profile used for reviews. It performs no model request.
-func Preflight(bin, runtimeDir, bubblewrapBin, engine string) error {
+// same Bubblewrap profile used for reviews. It performs no model request. The
+// default model is staged so the pi catalog probe resolves the gateway
+// provider that deployment will actually run; reviews with a dashboard-set
+// model of another provider are exercised at review time.
+func Preflight(bin, runtimeDir, bubblewrapBin, engine, model string) error {
 	if engine == "" {
 		engine = EngineOpenCode2
 	}
@@ -117,14 +120,15 @@ func Preflight(bin, runtimeDir, bubblewrapBin, engine string) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 	}
-	// The pi catalog probe proves the staged agent resolves the OpenCode Zen
-	// provider and the isolated credential store without a model request.
+	// The pi catalog probe proves the staged agent resolves the configured
+	// gateway provider and the isolated credential store without a model
+	// request.
 	probes := [][]string{{"--version"}, {"run", "--standalone", "--help"}}
 	if engine == EnginePi {
-		probes = [][]string{{"--version"}, {"--list-models", "opencode"}}
+		probes = [][]string{{"--version"}, {"--list-models", gatewayProviderForModel(model)}}
 	}
 	for _, probe := range probes {
-		files, err := newSandboxFiles(tmp, "preflight", engine, "")
+		files, err := newSandboxFiles(tmp, "preflight", engine, model)
 		if err != nil {
 			return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 		}
@@ -388,6 +392,11 @@ func newSandboxFiles(tmp, apiKey, engine, model string) (*sandboxFiles, error) {
 			return nil, err
 		}
 		if provider == ProviderOrcaRouter {
+			// The key is deliberately present in both stores: pi's documented
+			// custom-provider path reads the models.json apiKey, while the
+			// provider-keyed auth.json is the credential store the Zen path
+			// uses. Both files are per-run, FD-passed, and tmpfs-backed, so the
+			// duplicate does not widen the key's exposure.
 			files.models, err = jsonConfigFile(filepath.Join(secretsDir, "models.json"), piOrcaRouterModels(apiKey, modelIDForProvider(model)))
 			if err != nil {
 				files.Close()

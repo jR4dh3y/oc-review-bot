@@ -10,13 +10,15 @@ keeps using the same Zen credentials. The summary includes a Mermaid sequence di
 the inline findings. A React dashboard handles registration and administrator key management. One
 Go binary serves everything.
 
-> **Engine and Zen status.** OpenCode 2 is beta software and its CLI/configuration can change; this
+> **Engine and gateway status.** OpenCode 2 is beta software and its CLI/configuration can change; this
 > service invokes an externally installed `opencode2` binary. pi is a smaller, more stable
 > automation surface (`pi --print`), and both engines address models with the same
 > `provider/model` IDs. Neither binary is bundled with the Go or Bun dependencies.
-> [OpenCode Zen](https://opencode.ai/docs/zen/) is the model gateway for both engines: it carries
+> [OpenCode Zen](https://opencode.ai/docs/zen/) is the built-in model gateway for both engines: it carries
 > paid pay-as-you-go models **and** rate-limited free models (IDs ending in `-free`, for example
-> `opencode/big-pickle` or `opencode/glm-5.3-flash`), which pi can use without spend. Add only keys
+> `opencode/big-pickle` or `opencode/glm-5.3-flash`), which pi can use without spend. `orcarouter/…`
+> models route through [OrcaRouter](https://www.orcarouter.ai) instead (see
+> [Routing reviews through OrcaRouter](#routing-reviews-through-orcarouter)). Add only keys
 > your organization is authorized to operate. The pool must not be used to evade provider credits,
 > rate limits, spend limits, or terms of service.
 
@@ -28,7 +30,7 @@ Go binary serves everything.
    IDs must both be allowlisted → enqueue (one active review per PR; reacts 👀). Unregistered
    commenters receive a registration nudge; registered but unauthorized commenters receive an
    access nudge.
-2. Worker: pick the eligible Zen key with the fewest recorded requests today (skipping
+2. Worker: pick the eligible pooled key with the fewest recorded requests today (skipping
    cooling-down/disabled keys)
    → shallow-clone the PR head → fetch the diff via the GitHub API → write an isolated engine
    config and credential store (the key exists only inside the sandbox) in a temp XDG/config dir →
@@ -36,8 +38,8 @@ Go binary serves everything.
    reads repository files itself), selected model, isolated output, and a hard timeout. With
    `REVIEW_ENGINE=pi` the runner executes `pi --print` with a read-only tool allowlist
    (`read,grep,find,ls`), all project-local discovery disabled, no session persistence, and the
-   pooled key written to pi's isolated `auth.json` as the built-in `opencode` (Zen) provider
-   credential.
+   pooled key written to pi's isolated `auth.json` as the credential of the model's gateway
+   provider (built-in `opencode` for Zen, a per-run custom provider for `orcarouter/…`).
 3. Parse the agent's final message: last fenced JSON block `{summary, sequence_diagram, findings:[{path,
    line, side, severity, body}]}` (tolerant — plain text gets a safe fallback diagram) → map findings
    to diff lines via the PR file list (skip findings outside the diff) → post the summary with its
@@ -77,7 +79,7 @@ mise exec -- make run-local
 ```
 
 `opencode-check` runs `opencode2 --version` and `opencode2 run --help`; it does not call a model,
-validate the Bubblewrap sandbox, or need a Zen API key. `make run-local` loads `.env` only for a
+validate the Bubblewrap sandbox, or need a gateway API key. `make run-local` loads `.env` only for a
 local POSIX-shell run. The binary itself reads process environment variables and never parses `.env`;
 production must inject values through its secret manager. The web UI is at `$PUBLIC_URL` (`/`
 landing, `/dashboard` reviews, `/admin/keys`, `/admin/settings`). Health check: `GET /healthz` →
@@ -88,7 +90,7 @@ landing, `/dashboard` reviews, `/admin/keys`, `/admin/settings`). Health check: 
 Set `REVIEW_ENGINE=pi` (plus `PI_RUNTIME_DIR`, and optionally `PI_BIN`) to run
 [pi](https://github.com/earendil-works/pi) instead of `opencode2`. The OpenCode configuration
 above stays valid and untouched — the two engines are configured, staged, and validated separately,
-so you can switch back with one env var. Both engines use the same Zen key pool and the same
+so you can switch back with one env var. Both engines use the same pooled gateway keys and the same
 `ZEN_DEFAULT_MODEL` / dashboard model setting in `provider/model` form; for free models pick a Zen
 `-free` model ID (for example `opencode/big-pickle`).
 
@@ -114,8 +116,10 @@ PI_BIN=/opt/pi-runtime/bin/pi mise exec -- make pi-check
 ```
 
 `pi-check` runs `pi --version` and `pi --help`; the service's startup preflight additionally runs
-`pi --list-models opencode` inside the same Bubblewrap profile, which proves the staged agent
-resolves the built-in `opencode` (Zen) provider from the isolated credential store without calling
+`pi --list-models <gateway>` inside the same Bubblewrap profile, where `<gateway>` is the provider
+prefix of the configured default model (`opencode` for Zen, `orcarouter` for OrcaRouter). This
+proves the staged agent
+resolves that gateway provider from the isolated credential store without calling
 a model.
 
 ### Routing reviews through OrcaRouter
@@ -195,7 +199,7 @@ there is no first-user administrator bootstrap. Add optional review-only IDs wit
 `REVIEWER_GITHUB_IDS`. Every requester, including an administrator, must log into the dashboard once
 with GitHub before the bot will review their PR, and every request must match both target allowlists.
 Do not set `ADMIN_GITHUB_LOGINS`: a non-empty legacy login allowlist is rejected at startup. Add
-organization-authorized Zen keys at `/admin/keys`. If the GitHub App login differs from the default,
+organization-authorized gateway keys at `/admin/keys`. If the GitHub App login differs from the default,
 set `BOT_USERNAME` to its mentionable login without a leading `@`.
 
 ### 4. Try it
@@ -215,7 +219,7 @@ commenters get a register-here reply.
 | `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_PRIVATE_KEY_PATH` | yes (at least one) | — | Inline PEM or path; a non-empty file path takes precedence |
 | `GITHUB_WEBHOOK_SECRET` | yes | — | HMAC secret for `/webhooks/github` |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | for a usable website | — | OAuth app; login routes return 503 without both values |
-| `SESSION_SECRET` | yes | — | Use 32+ random bytes to derive Zen-key encryption; retain it while the DB exists |
+| `SESSION_SECRET` | yes | — | Use 32+ random bytes to derive pooled-key encryption; retain it while the DB exists |
 | `ADMIN_GITHUB_IDS` | yes | — | Comma-separated immutable numeric GitHub user IDs; administrators can manage the dashboard and request reviews |
 | `REVIEWER_GITHUB_IDS` | no | empty | Additional comma-separated numeric GitHub user IDs that can request, but not administer, reviews |
 | `ALLOWED_GITHUB_INSTALLATION_IDS` | yes | — | Comma-separated numeric GitHub App installation IDs; each review target must match |
@@ -224,7 +228,7 @@ commenters get a register-here reply.
 | `ZEN_DEFAULT_MODEL` | yes | — | Current enabled `provider/model` identifier; initial value, overridable at `/admin/settings`. The provider prefix selects the gateway: `opencode/…` (OpenCode Zen, the default) or `orcarouter/…` (OrcaRouter); the key pool must match that gateway |
 | `REVIEW_CONCURRENCY` | no | `2` | Worker pool size; must be at least 1 |
 | `REVIEW_TIMEOUT_MINUTES` | no | `20` | Per-review hard timeout; must be at least 1 |
-| `ZEN_COOLDOWN_MINUTES` | no | `60` | Cooldown after a Zen quota/rate-limit error; must be at least 1 |
+| `ZEN_COOLDOWN_MINUTES` | no | `60` | Cooldown after a gateway quota/rate-limit error; must be at least 1 |
 | `USER_REVIEWS_PER_HOUR` | no | `6` | Per-requester admission limit; must be at least 1 |
 | `REPO_REVIEWS_PER_HOUR` | no | `30` | Per-repository admission limit; must be at least 1 |
 | `MAX_ACTIVE_REVIEWS` | no | `50` | Maximum queued or running reviews; must be at least 1 |
@@ -246,7 +250,7 @@ trusted runtime directory with no symlinked, group-writable, or world-writable e
 non-symlink Bubblewrap executable. It bind-mounts the runtime and PR checkout read-only; it never
 falls back to executing the reviewer engine directly when that boundary cannot be established.
 
-Zen API keys are intentionally entered by an authenticated administrator at `/admin/keys`, not via
+Gateway API keys are intentionally entered by an authenticated administrator at `/admin/keys`, not via
 an environment variable. The database stores them encrypted, but the database and `SESSION_SECRET`
 must be retained together; replacing the secret makes existing stored keys unreadable.
 
@@ -284,6 +288,6 @@ All JSON, session cookie `samik_session`:
 
 - `mise exec -- make check` runs Go formatting verification, `go vet`, Go tests, the frontend
   build, and a production binary build.
-- A live review can incur OpenCode Zen charges. Use an authorized funded test key, add it at
+- A live review can incur gateway charges (OpenCode Zen or OrcaRouter). Use an authorized funded test key, add it at
   `/admin/keys`, comment `@samik-bot` on a test PR, and watch `/dashboard` go queued →
   running → done (or failed, with the cause on the review detail page).

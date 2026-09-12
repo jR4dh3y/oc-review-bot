@@ -83,12 +83,22 @@ func RenderInlineBody(f Finding) string {
 	return truncateUTF8(severityBadge(f.Severity)+"\n\n"+body, maxGitHubCommentBytes)
 }
 
+// GatewayName returns the human-readable gateway a review model runs on. It
+// mirrors the runner's gateway rule for display: only orcarouter/… models
+// leave the built-in OpenCode Zen provider.
+func GatewayName(model string) string {
+	if strings.HasPrefix(model, "orcarouter/") {
+		return "OrcaRouter"
+	}
+	return "OpenCode Zen"
+}
+
 // RenderSummaryComment formats the PR-level summary comment.
 func RenderSummaryComment(result ReviewResult, botName, model string) string {
 	botName = normalizeMetadata(botName)
 	model = normalizeMetadata(model)
 	footer := "\n\n<sub>Reviewed by " + botName + " with `" + model +
-		"` (OpenCode Zen). Trigger me by mentioning `@" + botName + "` in a comment.</sub>\n"
+		"` (" + GatewayName(model) + "). Trigger me by mentioning `@" + botName + "` in a comment.</sub>\n"
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("## 🤖 %s review\n\n", botName))

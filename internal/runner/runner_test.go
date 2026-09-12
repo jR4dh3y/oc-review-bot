@@ -941,7 +941,7 @@ if [ "$1" = --version ]; then printf '%s\n' 'opencode2 vtest'; elif [ "$1" = run
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Preflight(bin, runtimeDir, bubblewrapBin, EngineOpenCode2); err != nil {
+	if err := Preflight(bin, runtimeDir, bubblewrapBin, EngineOpenCode2, "opencode/big-pickle"); err != nil {
 		t.Fatalf("Preflight() error = %v", err)
 	}
 }
@@ -958,7 +958,33 @@ else exit 1; fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Preflight(bin, runtimeDir, bubblewrapBin, EnginePi); err != nil {
+	if err := Preflight(bin, runtimeDir, bubblewrapBin, EnginePi, "opencode/big-pickle"); err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+}
+
+func TestPreflightProbesTheConfiguredGatewayProvider(t *testing.T) {
+	requireBubblewrap(t)
+	// The sandbox exposes no external commands, so the probe uses only shell
+	// builtins to inspect the staged models.json.
+	bin, runtimeDir := fakePiRuntime(t, `
+set -eu
+if [ "$1" = --version ]; then printf '%s\n' 'pi vtest';
+elif [ "$1" = --list-models ]; then
+  [ "$2" = orcarouter ] || exit 2
+  [ -f "$PI_CODING_AGENT_DIR/models.json" ] || exit 4
+  found=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *'"apiKey":"preflight"'*) found=1; break ;; esac
+  done < "$PI_CODING_AGENT_DIR/models.json"
+  [ "$found" = 1 ] || exit 5
+else exit 1; fi
+`)
+	bubblewrapBin, err := testBubblewrapPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Preflight(bin, runtimeDir, bubblewrapBin, EnginePi, "orcarouter/auto"); err != nil {
 		t.Fatalf("Preflight() error = %v", err)
 	}
 }

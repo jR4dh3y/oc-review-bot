@@ -74,9 +74,12 @@ also verify the runtime tree and Bubblewrap capability before executing untruste
   world-writable entries). Because pi is a Node CLI, stage the `node` executable inside the tree
   and give `bin/pi` an absolute shebang such as `#!/opt/pi-runtime/bin/node`; the sandbox has no
   host `/usr/bin/env`. See the README's pi staging recipe.
-- Startup preflight runs `pi --version` and `pi --list-models opencode` inside the same Bubblewrap
-  profile used for reviews. The catalog probe proves the staged agent resolves the built-in
-  `opencode` (Zen) provider from the isolated credential store without calling a model.
+- Startup preflight runs `pi --version` and `pi --list-models <gateway>` inside the same Bubblewrap
+  profile used for reviews, where `<gateway>` is the provider prefix of the configured
+  `ZEN_DEFAULT_MODEL` (`opencode` for Zen, `orcarouter` for OrcaRouter). The catalog probe proves
+  the staged agent resolves that provider's credentials from the isolated credential store without
+  calling a model; a model later selected in the dashboard for the other gateway is exercised at
+  review time.
 - Each pi review runs `pi --print` with a fixed, non-configurable flag set: model from the shared
   `provider/model` setting, a read-only tool allowlist (`read`, `grep`, `find`, `ls`), all
   project-local discovery disabled (extensions, skills, prompt templates, themes, context files,
