@@ -6,6 +6,7 @@ import { RequireUser } from "@/components/auth-gate";
 import { LoadingState, RequestError } from "@/components/query-state";
 import { api, getErrorMessage } from "@/lib/api";
 import { userQueryKey, useCurrentUser, useUnauthorizedRedirect } from "@/lib/auth";
+import { formatDateTime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -340,9 +341,4 @@ function ZenKeyManager() {
       </CardContent>
     </Card>
   );
-}
-
-function formatDateTime(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "an unknown time" : date.toLocaleString();
 }

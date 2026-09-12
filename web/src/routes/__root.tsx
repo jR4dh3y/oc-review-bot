@@ -39,7 +39,7 @@ function RootLayout() {
       >
         Skip to content
       </a>
-      <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/80 backdrop-blur">
+      <header className="sticky top-0 z-20 border-b border-zinc-200 bg-white">
         <div className="mx-auto flex min-h-14 max-w-5xl flex-wrap items-center gap-x-2 gap-y-2 px-4 py-2 sm:flex-nowrap sm:py-0">
           <Link
             to="/"
