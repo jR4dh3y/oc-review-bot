@@ -2,6 +2,7 @@ GO ?= go
 BUN ?= bun
 MISE ?= mise
 OPENCODE_BIN ?= opencode2
+PI_BIN ?= pi
 
 WEB_DIR := web
 BIN_DIR := bin
@@ -9,12 +10,13 @@ BINARY := $(BIN_DIR)/oc-review-bot
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup install opencode-check fmt-check vet test web-build build check run run-local web-dev clean
+.PHONY: help setup install opencode-check pi-check fmt-check vet test web-build build check run run-local web-dev clean
 
 help:
 	@printf '%s\n' 'Targets:' \
 		'  make setup       Install repository-pinned Go/Bun and dependencies' \
 		'  make opencode-check  Verify the installed OpenCode 2 beta CLI' \
+		'  make pi-check    Verify the installed pi coding agent CLI' \
 		'  make check       Verify formatting, Go code, frontend, and binary build' \
 		'  make build       Build the embedded dashboard and bin/oc-review-bot' \
 		'  make run         Run the service from source with injected environment' \
@@ -37,6 +39,14 @@ opencode-check:
 	}
 	@"$(OPENCODE_BIN)" --version
 	@"$(OPENCODE_BIN)" run --help >/dev/null
+
+pi-check:
+	@command -v "$(PI_BIN)" >/dev/null 2>&1 || { \
+		printf '%s\n' "pi binary '$(PI_BIN)' was not found; install the pi coding agent CLI or set PI_BIN."; \
+		exit 1; \
+	}
+	@"$(PI_BIN)" --version
+	@"$(PI_BIN)" --help >/dev/null
 
 fmt-check:
 	@unformatted="$$(gofmt -l $$(find cmd internal web -type f -name '*.go'))"; \

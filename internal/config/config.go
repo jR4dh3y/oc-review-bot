@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// Reviewer engines. The default keeps the OpenCode 2 beta integration; "pi"
+// selects the pi coding agent against the same pooled Zen credentials.
+const (
+	EngineOpenCode2 = "opencode2"
+	EnginePi        = "pi"
+)
+
 // Config is the full runtime configuration, sourced from env vars.
 type Config struct {
 	Port                string
@@ -38,10 +45,13 @@ type Config struct {
 	UserReviewsPerHour  int
 	RepoReviewsPerHour  int
 	MaxActiveReviews    int
+	ReviewEngine        string // active reviewer engine: EngineOpenCode2 (default) or EnginePi
 	OpenCodeBin         string
 	OpenCodeRuntimeDir  string
+	PiBin               string
+	PiRuntimeDir        string
 	BubblewrapBin       string
-	OpenCodeArgs        []string // flags passed after `opencode2 run`
+	OpenCodeArgs        []string // flags passed after `opencode2 run`; empty for pi
 	LogLevel            slog.Level
 }
 
@@ -59,8 +69,11 @@ func Load() (*Config, error) {
 		SessionSecret:      os.Getenv("SESSION_SECRET"),
 		BotUsername:        env("BOT_USERNAME", "oc-review-bot"),
 		DefaultModel:       strings.TrimSpace(os.Getenv("ZEN_DEFAULT_MODEL")),
+		ReviewEngine:       strings.TrimSpace(env("REVIEW_ENGINE", EngineOpenCode2)),
 		OpenCodeBin:        strings.TrimSpace(env("OPENCODE_BIN", "opencode2")),
 		OpenCodeRuntimeDir: strings.TrimSpace(os.Getenv("OPENCODE_RUNTIME_DIR")),
+		PiBin:              strings.TrimSpace(env("PI_BIN", "pi")),
+		PiRuntimeDir:       strings.TrimSpace(os.Getenv("PI_RUNTIME_DIR")),
 		BubblewrapBin:      strings.TrimSpace(os.Getenv("BUBBLEWRAP_BIN")),
 	}
 	botIDs, err := envIDList("BOT_GITHUB_ID", true)
@@ -100,16 +113,27 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	if !isOpenCode2Bin(c.OpenCodeBin) {
-		return nil, fmt.Errorf("OPENCODE_BIN must name the OpenCode 2 opencode2 executable")
+	// Engine-specific staging is validated per engine so one deployment can
+	// hold both configurations and switch REVIEW_ENGINE without re-staging.
+	switch c.ReviewEngine {
+	case EngineOpenCode2:
+		if !isOpenCode2Bin(c.OpenCodeBin) {
+			return nil, fmt.Errorf("OPENCODE_BIN must name the OpenCode 2 opencode2 executable")
+		}
+		// The v2 CLI talks to a background service by default; each review must
+		// run against its own isolated server and config, including when a full
+		// executable path is configured.
+		c.OpenCodeArgs = []string{"--standalone"}
+	case EnginePi:
+		if !isPiBin(c.PiBin) {
+			return nil, fmt.Errorf("PI_BIN must name the pi executable")
+		}
+	default:
+		return nil, fmt.Errorf("REVIEW_ENGINE must be %q or %q", EngineOpenCode2, EnginePi)
 	}
 	if !validGitHubLogin(c.BotUsername) {
 		return nil, fmt.Errorf("BOT_USERNAME must be a GitHub login without @")
 	}
-	// The v2 CLI talks to a background service by default; each review must
-	// run against its own isolated server and config, including when a full
-	// executable path is configured.
-	c.OpenCodeArgs = []string{"--standalone"}
 
 	if c.AdminGitHubIDs, err = envIDList("ADMIN_GITHUB_IDS", true); err != nil {
 		return nil, err
@@ -187,8 +211,15 @@ func Load() (*Config, error) {
 	if c.MaxActiveReviews < 1 {
 		return nil, fmt.Errorf("MAX_ACTIVE_REVIEWS must be at least 1")
 	}
-	if c.OpenCodeRuntimeDir == "" {
-		missing = append(missing, "OPENCODE_RUNTIME_DIR")
+	switch c.ReviewEngine {
+	case EnginePi:
+		if c.PiRuntimeDir == "" {
+			missing = append(missing, "PI_RUNTIME_DIR")
+		}
+	default:
+		if c.OpenCodeRuntimeDir == "" {
+			missing = append(missing, "OPENCODE_RUNTIME_DIR")
+		}
 	}
 	if c.BubblewrapBin == "" {
 		missing = append(missing, "BUBBLEWRAP_BIN")
@@ -214,6 +245,21 @@ func Load() (*Config, error) {
 func isOpenCode2Bin(bin string) bool {
 	base := strings.TrimSuffix(strings.ToLower(filepath.Base(bin)), ".exe")
 	return base == "opencode2"
+}
+
+func isPiBin(bin string) bool {
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(bin)), ".exe")
+	return base == "pi"
+}
+
+// AgentRuntime returns the active reviewer engine with its executable and
+// trusted runtime directory. The inactive engine's configuration is never
+// consulted, so deployments can stage or retain both independently.
+func (c *Config) AgentRuntime() (engine, bin, runtimeDir string) {
+	if c.ReviewEngine == EnginePi {
+		return EnginePi, c.PiBin, c.PiRuntimeDir
+	}
+	return EngineOpenCode2, c.OpenCodeBin, c.OpenCodeRuntimeDir
 }
 
 func validGitHubLogin(login string) bool {

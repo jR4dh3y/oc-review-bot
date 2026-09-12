@@ -767,6 +767,40 @@ func TestTerminalAgentFailureMarksReviewFailed(t *testing.T) {
 	}
 }
 
+func TestTerminalPiFailureUsesPiCauseAndEngineOptions(t *testing.T) {
+	var logs bytes.Buffer
+	runErr := fmt.Errorf("run reviewer: %w", &runner.AgentFailure{
+		Err:        fmt.Errorf("%w: pi exited", runner.ErrExecution),
+		Diagnostic: "pi config dir missing",
+	})
+	rev, eng, st, _ := newReviewFailureHarness(t, runErr, &logs)
+	eng.cfg.ReviewEngine = config.EnginePi
+	eng.cfg.PiBin = "pi"
+	eng.cfg.PiRuntimeDir = "/opt/pi-runtime"
+
+	var got runner.Options
+	eng.run = func(_ context.Context, opts runner.Options) (string, error) {
+		got = opts
+		return "", runErr
+	}
+
+	eng.processOne(context.Background(), rev.ID)
+
+	stored, err := st.Review(rev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != store.StatusFailed {
+		t.Fatalf("review status = %s, want %s", stored.Status, store.StatusFailed)
+	}
+	if !strings.Contains(stored.Error, "pi_execution") {
+		t.Fatalf("stored error = %q, want cause pi_execution", stored.Error)
+	}
+	if got.Engine != config.EnginePi || got.Bin != "pi" || got.RuntimeDir != "/opt/pi-runtime" || got.RunArgs != nil {
+		t.Fatalf("runner options = %+v, want the pi engine staging without run args", got)
+	}
+}
+
 func TestCanceledReviewContextStaysRecoverable(t *testing.T) {
 	rev, eng, st, h := newReviewFailureHarness(t, context.Canceled, nil)
 

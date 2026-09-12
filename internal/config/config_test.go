@@ -222,6 +222,82 @@ func TestLoadUsesStandaloneForOpenCode2Path(t *testing.T) {
 	}
 }
 
+func TestLoadSelectsPiEngineWithSeparateRuntimeConfig(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("REVIEW_ENGINE", "pi")
+	t.Setenv("PI_RUNTIME_DIR", "/opt/pi-runtime")
+	t.Setenv("PI_BIN", "")
+	// The OpenCode runtime is not required while pi is active; its separate
+	// configuration may remain absent or partially staged.
+	t.Setenv("OPENCODE_RUNTIME_DIR", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewEngine != EnginePi || cfg.PiBin != "pi" || cfg.PiRuntimeDir != "/opt/pi-runtime" {
+		t.Fatalf("pi engine config = %q %q %q", cfg.ReviewEngine, cfg.PiBin, cfg.PiRuntimeDir)
+	}
+	if cfg.OpenCodeArgs != nil {
+		t.Fatalf("OpenCode args = %v, want none for the pi engine", cfg.OpenCodeArgs)
+	}
+	engine, bin, runtimeDir := cfg.AgentRuntime()
+	if engine != EnginePi || bin != "pi" || runtimeDir != "/opt/pi-runtime" {
+		t.Fatalf("AgentRuntime() = %q %q %q, want the pi staging", engine, bin, runtimeDir)
+	}
+}
+
+func TestLoadKeepsOpenCodeEngineSeparateFromPiConfig(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("REVIEW_ENGINE", "")
+	t.Setenv("PI_RUNTIME_DIR", "/opt/pi-runtime")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewEngine != EngineOpenCode2 {
+		t.Fatalf("ReviewEngine = %q, want the opencode2 default", cfg.ReviewEngine)
+	}
+	if !reflect.DeepEqual(cfg.OpenCodeArgs, []string{"--standalone"}) {
+		t.Fatalf("OpenCode args = %v, want [--standalone]", cfg.OpenCodeArgs)
+	}
+	engine, bin, runtimeDir := cfg.AgentRuntime()
+	if engine != EngineOpenCode2 || bin != "opencode2" || runtimeDir != "/opt/opencode-runtime" {
+		t.Fatalf("AgentRuntime() = %q %q %q, want the opencode2 staging", engine, bin, runtimeDir)
+	}
+}
+
+func TestLoadRejectsUnknownReviewEngine(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("REVIEW_ENGINE", "claude")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REVIEW_ENGINE") {
+		t.Fatalf("unknown engine error = %v", err)
+	}
+}
+
+func TestLoadRequiresPiRuntimeForPiEngine(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("REVIEW_ENGINE", "pi")
+	t.Setenv("PI_RUNTIME_DIR", "")
+	t.Setenv("PI_BIN", "pi")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PI_RUNTIME_DIR") {
+		t.Fatalf("missing pi runtime error = %v", err)
+	}
+}
+
+func TestLoadRejectsPiBinNamedForAnotherEngine(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("REVIEW_ENGINE", "pi")
+	t.Setenv("PI_RUNTIME_DIR", "/opt/pi-runtime")
+	for _, value := range []string{"opencode2", "/opt/pi-runtime/bin/opencode2", "picli"} {
+		t.Setenv("PI_BIN", value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PI_BIN") {
+			t.Fatalf("PI_BIN %q error = %v, want naming rejection", value, err)
+		}
+	}
+}
+
 func TestLoadNormalizesHTTPSPublicURLAndSecuresCookies(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("PUBLIC_URL", "HTTPS://example.test/")

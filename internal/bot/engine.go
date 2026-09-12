@@ -760,12 +760,20 @@ func (e *Engine) runWithPool(ctx context.Context, token string, r *store.Review,
 		if err := e.reviewSideEffectError(ctx, r); err != nil {
 			return nil, "", err
 		}
+		engine, bin, runtimeDir := e.cfg.AgentRuntime()
+		// The opencode isolation flags belong to the opencode2 engine alone; a
+		// pi run must never inherit them even if both configs are populated.
+		runArgs := e.cfg.OpenCodeArgs
+		if engine == config.EnginePi {
+			runArgs = nil
+		}
 		r.Model = model
 		out, runErr := e.run(ctx, runner.Options{
-			Bin:           e.cfg.OpenCodeBin,
-			RuntimeDir:    e.cfg.OpenCodeRuntimeDir,
+			Engine:        engine,
+			Bin:           bin,
+			RuntimeDir:    runtimeDir,
 			BubblewrapBin: e.cfg.BubblewrapBin,
-			RunArgs:       e.cfg.OpenCodeArgs,
+			RunArgs:       runArgs,
 			CloneURL:      fmt.Sprintf("https://github.com/%s.git", r.RepoFull),
 			GitHubToken:   token,
 			Ref:           fmt.Sprintf("refs/pull/%d/head", r.PRNumber),
@@ -1078,7 +1086,7 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 			log.Error("requeue review", "err", requeueErr)
 			return
 		}
-		log.Warn("review delivery deferred", "attempt", r.ExecutionGeneration, "cause", reviewErrorClass(err))
+		log.Warn("review delivery deferred", "attempt", r.ExecutionGeneration, "cause", reviewErrorClass(err, e.cfg.ReviewEngine))
 		e.signal()
 		return
 	}
@@ -1086,7 +1094,7 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 	// review defect. Leave the durable running row alone: startup recovery
 	// requeues it instead of failing the requester's review on every deploy.
 	if errors.Is(err, context.Canceled) {
-		log.Info("review interrupted; durable recovery will requeue it", "cause", reviewErrorClass(err))
+		log.Info("review interrupted; durable recovery will requeue it", "cause", reviewErrorClass(err, e.cfg.ReviewEngine))
 		return
 	}
 	// Terminal failure: record the outcome so the dashboard and the PR's
@@ -1094,7 +1102,7 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 	// stored; the underlying error can carry hostile repository content or
 	// provider secrets. The sanitized runner diagnostic and GitHub endpoint
 	// and status are safe for the service log.
-	attrs := []any{"cause", reviewErrorClass(err)}
+	attrs := []any{"cause", reviewErrorClass(err, e.cfg.ReviewEngine)}
 	if detail := runner.Diagnostic(err); detail != "" {
 		attrs = append(attrs, "detail", detail)
 	}
@@ -1103,7 +1111,7 @@ func (e *Engine) handleReviewError(ctx context.Context, token string, r *store.R
 		attrs = append(attrs, "github_status", httpErr.StatusCode, "github_endpoint", httpErr.Method+" "+httpErr.Path)
 	}
 	log.Error("review failed", attrs...)
-	if e.failReview(r, log, fmt.Sprintf("%s (cause: %s)", reviewFailureMessage, reviewErrorClass(err))) {
+	if e.failReview(r, log, fmt.Sprintf("%s (cause: %s)", reviewFailureMessage, reviewErrorClass(err, e.cfg.ReviewEngine))) {
 		e.signalReviewFailure(ctx, token, r, log)
 	}
 }
@@ -1136,7 +1144,7 @@ func isRetryableReviewError(err error) bool {
 		errors.Is(err, errPublicationInFlight)
 }
 
-func reviewErrorClass(err error) string {
+func reviewErrorClass(err error, engine string) string {
 	switch {
 	case errors.Is(err, runner.ErrCheckoutTooLarge):
 		return "checkout_too_large"
@@ -1147,6 +1155,9 @@ func reviewErrorClass(err error) string {
 	case errors.Is(err, runner.ErrAborted):
 		return "model_aborted"
 	case errors.Is(err, runner.ErrExecution):
+		if engine == config.EnginePi {
+			return "pi_execution"
+		}
 		return "opencode_execution"
 	case errors.Is(err, runner.ErrHeadChanged):
 		return "head_changed"

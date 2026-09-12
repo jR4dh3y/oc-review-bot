@@ -1,17 +1,23 @@
 # oc-review-bot
 
-Greptile/CodeRabbit-style PR review bot. Mention `@oc-review-bot` in a PR comment and it runs
-[OpenCode 2 beta](https://opencode.ai/v2/docs) (`opencode2`) against the PR diff using a pool of
-organization-authorized OpenCode Zen API keys, then posts one summary comment plus inline findings
-pinned to diff lines. The summary includes a Mermaid sequence diagram and precedes the inline
-findings. A React dashboard handles registration and administrator key management. One Go binary
-serves everything.
+Greptile/CodeRabbit-style PR review bot. Mention `@oc-review-bot` in a PR comment and it runs a
+reviewer coding agent against the PR diff using a pool of organization-authorized OpenCode Zen API
+keys, then posts one summary comment plus inline findings pinned to diff lines. The reviewer engine
+is configuration: the default is [OpenCode 2 beta](https://opencode.ai/v2/docs) (`opencode2`), or
+the lightweight, extensible [pi coding agent](https://github.com/earendil-works/pi) (`pi`), which
+keeps using the same Zen credentials. The summary includes a Mermaid sequence diagram and precedes
+the inline findings. A React dashboard handles registration and administrator key management. One
+Go binary serves everything.
 
-> **OpenCode and Zen status.** OpenCode 2 is beta software and its CLI/configuration can change.
-> This service invokes an externally installed `opencode2` binary; it is not bundled with the Go or
-> Bun dependencies. [OpenCode Zen](https://opencode.ai/docs/zen/) is pay-as-you-go, not a free tier.
-> Add only keys your organization is authorized to operate. The pool must not be used to evade
-> provider credits, rate limits, spend limits, or terms of service.
+> **Engine and Zen status.** OpenCode 2 is beta software and its CLI/configuration can change; this
+> service invokes an externally installed `opencode2` binary. pi is a smaller, more stable
+> automation surface (`pi --print`), and both engines address models with the same
+> `provider/model` IDs. Neither binary is bundled with the Go or Bun dependencies.
+> [OpenCode Zen](https://opencode.ai/docs/zen/) is the model gateway for both engines: it carries
+> paid pay-as-you-go models **and** rate-limited free models (IDs ending in `-free`, for example
+> `opencode/big-pickle` or `opencode/glm-5.3-flash`), which pi can use without spend. Add only keys
+> your organization is authorized to operate. The pool must not be used to evade provider credits,
+> rate limits, spend limits, or terms of service.
 
 ## How it works
 
@@ -23,11 +29,14 @@ serves everything.
    access nudge.
 2. Worker: pick the eligible Zen key with the fewest recorded requests today (skipping
    cooling-down/disabled keys)
-   → shallow-clone the PR head → fetch the diff via the GitHub API → write an isolated
-   `opencode.json` and `auth.json` (the key exists only in the isolated auth store) in a temp XDG
-   dir → run
-   `opencode2 run` in standalone mode with the review prompt (the agent reads repository files
-   itself), selected model, JSON output, and a hard timeout.
+   → shallow-clone the PR head → fetch the diff via the GitHub API → write an isolated engine
+   config and credential store (the key exists only inside the sandbox) in a temp XDG/config dir →
+   run the configured reviewer engine in a Bubblewrap sandbox with the review prompt (the agent
+   reads repository files itself), selected model, isolated output, and a hard timeout. With
+   `REVIEW_ENGINE=pi` the runner executes `pi --print` with a read-only tool allowlist
+   (`read,grep,find,ls`), all project-local discovery disabled, no session persistence, and the
+   pooled key written to pi's isolated `auth.json` as the built-in `opencode` (Zen) provider
+   credential.
 3. Parse the agent's final message: last fenced JSON block `{summary, sequence_diagram, findings:[{path,
    line, side, severity, body}]}` (tolerant — plain text gets a safe fallback diagram) → map findings
    to diff lines via the PR file list (skip findings outside the diff) → post the summary with its
@@ -72,6 +81,35 @@ local POSIX-shell run. The binary itself reads process environment variables and
 production must inject values through its secret manager. The web UI is at `$PUBLIC_URL` (`/`
 landing, `/dashboard` reviews, `/admin/keys`, `/admin/settings`). Health check: `GET /healthz` →
 `{"status":"ok"}`.
+
+### Selecting the pi reviewer engine
+
+Set `REVIEW_ENGINE=pi` (plus `PI_RUNTIME_DIR`, and optionally `PI_BIN`) to run
+[pi](https://github.com/earendil-works/pi) instead of `opencode2`. The OpenCode configuration
+above stays valid and untouched — the two engines are configured, staged, and validated separately,
+so you can switch back with one env var. Both engines use the same Zen key pool and the same
+`ZEN_DEFAULT_MODEL` / dashboard model setting in `provider/model` form; for free models pick a Zen
+`-free` model ID (for example `opencode/big-pickle`).
+
+Stage a pi runtime directory the same way as the OpenCode runtime: an absolute trusted directory
+(mounted read-only, no symlinked/group-writable/world-writable entries) containing `bin/pi` and
+its dependencies. pi is a Node CLI, so the sandbox tree must also contain the `node` executable —
+the sandbox has no host `/usr/bin/env`, so `bin/pi` must use an **absolute** shebang such as
+`#!/opt/pi-runtime/bin/node`. Example staging from an npm install:
+
+```bash
+npm pack @earendil-works/pi-coding-agent            # then unpack the tarball into /opt/pi-runtime/lib
+cp "$(command -v node)" /opt/pi-runtime/bin/node    # copy, never symlink
+sed '1s|^#!/usr/bin/env node|#!/opt/pi-runtime/bin/node|' \
+  /opt/pi-runtime/lib/package/dist/bundle/cli.js > /opt/pi-runtime/bin/pi
+chmod 0755 /opt/pi-runtime/bin/pi
+PI_BIN=/opt/pi-runtime/bin/pi mise exec -- make pi-check
+```
+
+`pi-check` runs `pi --version` and `pi --help`; the service's startup preflight additionally runs
+`pi --list-models opencode` inside the same Bubblewrap profile, which proves the staged agent
+resolves the built-in `opencode` (Zen) provider from the isolated credential store without calling
+a model.
 
 Build and verify the frontend plus single binary:
 
@@ -162,8 +200,11 @@ commenters get a register-here reply.
 | `USER_REVIEWS_PER_HOUR` | no | `6` | Per-requester admission limit; must be at least 1 |
 | `REPO_REVIEWS_PER_HOUR` | no | `30` | Per-repository admission limit; must be at least 1 |
 | `MAX_ACTIVE_REVIEWS` | no | `50` | Maximum queued or running reviews; must be at least 1 |
-| `OPENCODE_BIN` | no | `opencode2` | Must name an OpenCode 2 `opencode2` executable; an absolute path must be inside the runtime directory |
-| `OPENCODE_RUNTIME_DIR` | yes | — | Absolute trusted runtime root; the default binary is `$OPENCODE_RUNTIME_DIR/bin/opencode2` |
+| `OPENCODE_BIN` | for the `opencode2` engine | `opencode2` | Must name an OpenCode 2 `opencode2` executable; an absolute path must be inside the runtime directory |
+| `OPENCODE_RUNTIME_DIR` | for the `opencode2` engine | — | Absolute trusted runtime root; the default binary is `$OPENCODE_RUNTIME_DIR/bin/opencode2` |
+| `REVIEW_ENGINE` | no | `opencode2` | Reviewer engine: `opencode2` or `pi`; each engine's runtime config is validated and staged separately |
+| `PI_BIN` | for the `pi` engine | `pi` | Must name a `pi` executable; an absolute path must be inside the pi runtime directory |
+| `PI_RUNTIME_DIR` | for the `pi` engine | — | Absolute trusted runtime root holding `bin/pi`, `bin/node`, and the pi package files |
 | `BUBBLEWRAP_BIN` | yes | — | Bubblewrap executable path or command resolving to a trusted executable |
 | `LOG_LEVEL` | no | `info` | Service log level: `debug`, `info`, `warn`, or `error` |
 
@@ -175,7 +216,7 @@ value is rejected as unsafe.
 Every review runs under a mandatory Bubblewrap boundary. At review time, the runner requires a
 trusted runtime directory with no symlinked, group-writable, or world-writable entries, and a trusted
 non-symlink Bubblewrap executable. It bind-mounts the runtime and PR checkout read-only; it never
-falls back to executing OpenCode directly when that boundary cannot be established.
+falls back to executing the reviewer engine directly when that boundary cannot be established.
 
 Zen API keys are intentionally entered by an authenticated administrator at `/admin/keys`, not via
 an environment variable. The database stores them encrypted, but the database and `SESSION_SECRET`
@@ -205,7 +246,7 @@ All JSON, session cookie `oc_review_session`:
 - `internal/gh` — App JWT → installation token, REST (PR/files/diff/comments/reactions),
   webhook HMAC, OAuth exchange; `internal/server` — webhook handler, OAuth, admin JSON API, SPA
 - `internal/pool` — least-used eligible-key selection + configurable cooldown; `internal/runner` —
-  shallow clone + isolated `opencode2` exec + `--format json` text extraction
+  shallow clone + Bubblewrap sandbox + isolated reviewer exec (`opencode2` or pi) + final-message extraction
 - `internal/review` — prompt contract, tolerant findings parser, diff→line mapping
 - `internal/bot` — engine: fetch → runWithPool (one quota retry) → prepare and post the summary
   publication before inline findings → finish/fail
