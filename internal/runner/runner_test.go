@@ -298,7 +298,7 @@ func TestCheckoutRefetchesCorruptArchive(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	client := &flakyArchiveClient{tarball: testTarball(t), sha: sha}
 	dest := filepath.Join(t.TempDir(), "checkout")
-	if err := checkoutGitHubArchive(context.Background(), dest, "o", "r", sha, "token", client); err != nil {
+	if err := checkoutGitHubArchive(context.Background(), dest, "o", "r", sha, "token", client, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "f.txt"))
@@ -928,6 +928,35 @@ func TestRunEndToEndWithSandbox(t *testing.T) {
 	}
 	if got != "Reviewed the diff." {
 		t.Fatalf("output = %q", got)
+	}
+}
+
+func TestRunReportsOrderedProgressStages(t *testing.T) {
+	requireBubblewrap(t)
+	remote, head := initRemote(t, nil)
+	bin, runtimeDir := fakeRuntime(t, isolatedReviewerScript)
+
+	var stages []string
+	opts := runOptions(bin, runtimeDir, remote, head)
+	opts.OnProgress = func(stage string) { stages = append(stages, stage) }
+	if _, err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	want := []string{
+		StageSandboxReady,
+		StageCheckoutStart,
+		StageCheckoutDone,
+		StageSandboxSealed,
+		StageAgentStart,
+		StageAgentDone,
+	}
+	if len(stages) != len(want) {
+		t.Fatalf("stages = %v, want %v", stages, want)
+	}
+	for i, stage := range stages {
+		if stage != want[i] {
+			t.Fatalf("stages = %v, want %v", stages, want)
+		}
 	}
 }
 
