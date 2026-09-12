@@ -30,6 +30,9 @@ export const ReviewDetailRoute = createRoute({
 });
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
+// A reconciliation_required review stays claimable for its scheduled retry,
+// so it must keep polling even though it is not an active review.
+const PENDING_STATUSES = new Set([...ACTIVE_STATUSES, "reconciliation_required"]);
 
 // The published summary comment repeats its findings as a markdown list and
 // signs off inside a <sub> tag. The dashboard renders findings as cards of
@@ -75,7 +78,7 @@ function ReviewList() {
     queryFn: api.reviews,
     enabled: userID != null,
     refetchInterval: (query) =>
-      query.state.data?.some((review) => ACTIVE_STATUSES.has(review.status)) ? 3_000 : false,
+      query.state.data?.some((review) => PENDING_STATUSES.has(review.status)) ? 3_000 : false,
   });
   const sessionExpired = useUnauthorizedRedirect(reviews.error);
   const hasActiveReview = reviews.data?.some((review) => ACTIVE_STATUSES.has(review.status)) ?? false;
@@ -188,9 +191,7 @@ function ReviewDetail() {
     enabled: userID != null,
     refetchInterval: (query) => {
       const status = query.state.data?.review.status;
-      return status === "queued" || status === "running" || status === "reconciliation_required"
-        ? 3_000
-        : false;
+      return status != null && PENDING_STATUSES.has(status) ? 3_000 : false;
     },
   });
   const sessionExpired = useUnauthorizedRedirect(detail.error);

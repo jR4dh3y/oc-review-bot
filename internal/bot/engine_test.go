@@ -22,6 +22,7 @@ import (
 	"github.com/jR4dh3y/samik-bot/internal/config"
 	"github.com/jR4dh3y/samik-bot/internal/gh"
 	"github.com/jR4dh3y/samik-bot/internal/pool"
+	"github.com/jR4dh3y/samik-bot/internal/review"
 	"github.com/jR4dh3y/samik-bot/internal/runner"
 	"github.com/jR4dh3y/samik-bot/internal/seal"
 	"github.com/jR4dh3y/samik-bot/internal/store"
@@ -815,5 +816,55 @@ func TestCanceledReviewContextStaysRecoverable(t *testing.T) {
 	}
 	if want := []string{"eyes"}; !reflect.DeepEqual(h.reactions, want) {
 		t.Fatalf("reactions = %v, want %v (no failure signal on cancellation)", h.reactions, want)
+	}
+}
+
+func TestPreparePublicationStoresTheDiagramForTheDashboard(t *testing.T) {
+	st := testStoreForEngine(t)
+	rev := &store.Review{
+		RepoFull:          "o/r",
+		RepositoryID:      7,
+		PRNumber:          7,
+		InstallationID:    1,
+		RequesterGitHubID: 42,
+		RequesterLogin:    "alice",
+		TriggerCommentID:  99,
+	}
+	if err := st.CreateReview(rev); err != nil {
+		t.Fatal(err)
+	}
+	lease := testEngineLease(t, st, "diagram-in-summary")
+	claimed, ok, err := st.ClaimReviewByID(rev.ID, lease.OwnerToken, lease.Fence)
+	if err != nil || !ok {
+		t.Fatalf("claim review = %+v, %v, %v", claimed, ok, err)
+	}
+	pr := &gh.PR{Number: 7}
+	pr.Head.SHA = "head-sha"
+	pr.Head.Ref = "feature"
+	pr.Base.SHA = "base-sha"
+	pr.Base.Repo.ID = 7
+	pr.Base.Repo.FullName = "o/r"
+	if err := st.SetReviewRevision(rev.ID, claimed.ExecutionGeneration, "o/r", pr.Head.SHA, pr.RevisionToken(), lease.OwnerToken, lease.Fence); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(&config.Config{BotUsername: "samik-bot"}, st, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	running, err := st.Review(rev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.preparePublication(running, pr, review.NewDiffIndex(nil), review.ReviewResult{
+		SummaryMD:       "Narrative summary.",
+		SequenceDiagram: "sequenceDiagram\n    A->>B: Call",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := st.Review(rev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Narrative summary.", "```mermaid", "sequenceDiagram", "A->>B: Call"} {
+		if !strings.Contains(stored.SummaryMD, want) {
+			t.Fatalf("stored summary_md missing %q:\n%s", want, stored.SummaryMD)
+		}
 	}
 }

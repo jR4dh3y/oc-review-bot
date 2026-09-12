@@ -869,6 +869,10 @@ func (e *Engine) preparePublication(r *store.Review, pr *gh.PR, idx *review.Diff
 		})
 	}
 	plan.SummaryBodyMD = review.RenderSummaryComment(filtered, e.cfg.BotUsername, r.Model)
+	// Persist the rendered publication body as the review's summary so the
+	// dashboard detail keeps the generated sequence diagram; its
+	// publishedSummaryBody view strips the findings list and sign-off markup.
+	plan.SummaryMD = plan.SummaryBodyMD
 	return len(plan.Findings), e.st.PrepareReviewPublication(r.ID, r.ExecutionGeneration, plan, r.ServiceLeaseOwner, r.ClaimFence)
 }
 
