@@ -146,6 +146,18 @@ const (
 
 var quotaErrorPattern = regexp.MustCompile(`(?im)(?:\b(?:http|status(?:\s+code)?|code)\s*[:=]?\s*(?:402|429)\b|^\s*(?:402|429)\s*:|\b(?:rate[ -]?limit|quota)\s+(?:has\s+been\s+)?(?:exceeded|reached|exhausted)\b)`)
 
+// Progress stages reported through Options.OnProgress, in the order a
+// successful run emits them.
+const (
+	StageCheckoutStart = "checkout_start"
+	StageCheckoutRetry = "checkout_retry"
+	StageCheckoutDone  = "checkout_done"
+	StageSandboxReady  = "sandbox_ready"
+	StageSandboxSealed = "sandbox_sealed"
+	StageAgentStart    = "agent_start"
+	StageAgentDone     = "agent_done"
+)
+
 // Options configures one run.
 type Options struct {
 	Engine        string   // reviewer engine: EngineOpenCode2 (default) or EnginePi
@@ -162,9 +174,21 @@ type Options struct {
 	Diff          []byte   // PR diff, attached to the message
 	Prompt        string
 
+	// OnProgress optionally receives runner lifecycle stage notifications. The
+	// callback receives only the stage string: never a key, token, prompt,
+	// diff, or agent output.
+	OnProgress func(stage string)
+
 	// testOnlyLocalClone permits package tests to use a disposable file remote.
 	// It is unexported so production callers cannot bypass the GitHub boundary.
 	testOnlyLocalClone bool
+}
+
+// progress reports a runner lifecycle stage to the optional OnProgress hook.
+func (o Options) progress(stage string) {
+	if o.OnProgress != nil {
+		o.OnProgress(stage)
+	}
 }
 
 // Run clones the repo, isolates the reviewer engine's config with the pooled
@@ -184,15 +208,18 @@ func Run(ctx context.Context, o Options) (string, error) {
 		// The resolver's messages are operator-owned configuration failures.
 		return "", &AgentFailure{Err: err, Diagnostic: sanitizeDiagnostic(err.Error())}
 	}
+	o.progress(StageSandboxReady)
 	tmp, err := os.MkdirTemp("", "samik-bot-*")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
 
+	o.progress(StageCheckoutStart)
 	if err := checkout(ctx, tmp, o); err != nil {
 		return "", fmt.Errorf("checkout: %w", err)
 	}
+	o.progress(StageCheckoutDone)
 
 	checkoutDir := filepath.Join(tmp, "checkout")
 	if err := hardenCheckout(checkoutDir); err != nil {
@@ -214,6 +241,7 @@ func Run(ctx context.Context, o Options) (string, error) {
 		return "", err
 	}
 	defer files.Close()
+	o.progress(StageSandboxSealed)
 	// The reviewer's data directory lives on the host, not tmpfs: the
 	// current OpenCode beta fails to create its session database on tmpfs.
 	// pi keeps no host state; its sandbox profile leaves this unmounted.
@@ -250,6 +278,7 @@ func Run(ctx context.Context, o Options) (string, error) {
 		}
 	}
 	stderr.onExceeded = stdout.onExceeded
+	o.progress(StageAgentStart)
 	if err := cmd.Start(); err != nil {
 		return "", &AgentFailure{
 			Err:        fmt.Errorf("%w: start bubblewrap reviewer", ErrSandboxUnavailable),
@@ -288,6 +317,7 @@ func Run(ctx context.Context, o Options) (string, error) {
 			Diagnostic: agentFailureDetail(stderr.String(), stdout.String()),
 		}
 	}
+	o.progress(StageAgentDone)
 	// pi --print writes only the final assistant message to stdout; the
 	// opencode2 CLI emits JSONL events that must be unwrapped first.
 	if o.Engine == EnginePi {
@@ -478,7 +508,7 @@ func checkout(ctx context.Context, tmp string, o Options) error {
 	if err != nil {
 		return err
 	}
-	return checkoutGitHubArchive(ctx, filepath.Join(tmp, "checkout"), owner, repository, o.ExpectedSHA, o.GitHubToken, githubArchiveHTTPClient)
+	return checkoutGitHubArchive(ctx, filepath.Join(tmp, "checkout"), owner, repository, o.ExpectedSHA, o.GitHubToken, githubArchiveHTTPClient, o.OnProgress)
 }
 
 type archiveHTTPClient interface {
@@ -509,7 +539,7 @@ const checkoutAttempts = 3
 
 var checkoutRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second}
 
-func checkoutGitHubArchive(ctx context.Context, destination, owner, repository, sha, token string, client archiveHTTPClient) error {
+func checkoutGitHubArchive(ctx context.Context, destination, owner, repository, sha, token string, client archiveHTTPClient, onProgress func(string)) error {
 	var err error
 	for attempt := range checkoutAttempts {
 		if attempt > 0 {
@@ -524,6 +554,9 @@ func checkoutGitHubArchive(ctx context.Context, destination, owner, repository, 
 			case <-timer.C:
 			}
 			_ = os.RemoveAll(destination)
+			if onProgress != nil {
+				onProgress(StageCheckoutRetry)
+			}
 		}
 		if err = checkoutGitHubArchiveOnce(ctx, destination, owner, repository, sha, token, client); err == nil {
 			return nil
