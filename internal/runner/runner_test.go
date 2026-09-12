@@ -41,7 +41,7 @@ func TestExtractTextFromJSONL(t *testing.T) {
 }
 
 func TestOpenCodeConfigUsesOnlyV2Permissions(t *testing.T) {
-	cfg := openCodeConfig()
+	cfg := openCodeConfig("opencode/big-pickle")
 	if _, ok := cfg["permission"]; ok {
 		t.Fatal("V1 permission field must not be emitted")
 	}
@@ -643,7 +643,7 @@ func piRunOptions(bin, runtimeDir, remote, head string) Options {
 }
 
 func TestSandboxFilesUseValidJSON(t *testing.T) {
-	files, err := newSandboxFiles(t.TempDir(), `sk-test-\"quoted\"`, EngineOpenCode2)
+	files, err := newSandboxFiles(t.TempDir(), `sk-test-\"quoted\"`, EngineOpenCode2, "opencode/big-pickle")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,7 +667,7 @@ func TestSandboxFilesUseValidJSON(t *testing.T) {
 }
 
 func TestSandboxFilesForPiUseZenCredentialStore(t *testing.T) {
-	files, err := newSandboxFiles(t.TempDir(), `sk-test-\"quoted\"`, EnginePi)
+	files, err := newSandboxFiles(t.TempDir(), `sk-test-\"quoted\"`, EnginePi, "opencode/big-pickle")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,6 +698,193 @@ func TestSandboxFilesForPiUseZenCredentialStore(t *testing.T) {
 	}
 	if parsedSettings["defaultProjectTrust"] != "never" || parsedSettings["enableInstallTelemetry"] != false {
 		t.Fatalf("settings = %v", parsedSettings)
+	}
+}
+
+func TestGatewayProviderForModel(t *testing.T) {
+	cases := map[string]string{
+		"orcarouter/auto":      ProviderOrcaRouter,
+		"orcarouter/auto#high": ProviderOrcaRouter,
+		"opencode/big-pickle":  ProviderOpenCode,
+		"openai/gpt-5":         ProviderOpenCode,
+		"orcarouter":           ProviderOpenCode,
+		"":                     ProviderOpenCode,
+	}
+	for model, want := range cases {
+		if got := gatewayProviderForModel(model); got != want {
+			t.Fatalf("gatewayProviderForModel(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestOpenCodeConfigDeclaresOrcaRouterProvider(t *testing.T) {
+	cfg := openCodeConfig("orcarouter/auto#high")
+	providers, ok := cfg["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider config = %#v, want an orcarouter provider block", cfg["provider"])
+	}
+	provider, ok := providers[ProviderOrcaRouter].(map[string]any)
+	if !ok {
+		t.Fatalf("orcarouter provider = %#v", providers[ProviderOrcaRouter])
+	}
+	if provider["npm"] != "@ai-sdk/openai-compatible" {
+		t.Fatalf("orcarouter npm = %v", provider["npm"])
+	}
+	options, ok := provider["options"].(map[string]any)
+	if !ok || options["baseURL"] != OrcaRouterBaseURL {
+		t.Fatalf("orcarouter options = %#v, want baseURL %q", provider["options"], OrcaRouterBaseURL)
+	}
+	models, ok := provider["models"].(map[string]any)
+	if !ok {
+		t.Fatalf("orcarouter models = %#v", provider["models"])
+	}
+	// The #variant suffix selects behavior on the same model ID and must not
+	// become its own model entry.
+	if _, ok := models["auto"]; !ok {
+		t.Fatalf("orcarouter models = %#v, want the auto model entry", models)
+	}
+	if len(models) != 1 {
+		t.Fatalf("orcarouter models = %#v, want exactly the variant-free model ID", models)
+	}
+	// The key must never be embedded in the provider block.
+	if blob, err := json.Marshal(cfg); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(blob), "sk-secret") {
+		t.Fatal("provider config must not carry the pooled key")
+	}
+
+	zen := openCodeConfig("opencode/big-pickle")
+	if _, ok := zen["provider"]; ok {
+		t.Fatalf("Zen models must keep the built-in provider, got %#v", zen["provider"])
+	}
+}
+
+func TestSandboxFilesForOpenCode2DeclareOrcaRouterProvider(t *testing.T) {
+	files, err := newSandboxFiles(t.TempDir(), "sk-orca-test", EngineOpenCode2, "orcarouter/auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	if files.models != nil {
+		t.Fatal("opencode2 runs must not produce a pi models.json")
+	}
+	config, err := os.ReadFile(files.config.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsedConfig struct {
+		Provider map[string]struct {
+			Options struct {
+				BaseURL string `json:"baseURL"`
+			} `json:"options"`
+			Models map[string]any `json:"models"`
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal(config, &parsedConfig); err != nil {
+		t.Fatalf("opencode.json is invalid: %v", err)
+	}
+	provider, ok := parsedConfig.Provider["orcarouter"]
+	if !ok || provider.Options.BaseURL != OrcaRouterBaseURL {
+		t.Fatalf("orcarouter provider = %#v", parsedConfig.Provider)
+	}
+	if _, ok := provider.Models["auto"]; !ok {
+		t.Fatalf("orcarouter models = %#v, want the auto model entry", provider.Models)
+	}
+	auth, err := os.ReadFile(files.auth.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsedAuth map[string]struct {
+		Type string `json:"type"`
+		Key  string `json:"key"`
+	}
+	if err := json.Unmarshal(auth, &parsedAuth); err != nil {
+		t.Fatalf("auth JSON is invalid: %v", err)
+	}
+	entry, ok := parsedAuth["orcarouter"]
+	if !ok || entry.Type != "api" || entry.Key != "sk-orca-test" {
+		t.Fatalf("orcarouter auth entry = %#v", parsedAuth)
+	}
+	if _, ok := parsedAuth["opencode"]; ok {
+		t.Fatal("an orcarouter run must not also claim the Zen credential")
+	}
+}
+
+func TestSandboxFilesForPiDeclareOrcaRouterProvider(t *testing.T) {
+	files, err := newSandboxFiles(t.TempDir(), "sk-orca-test", EnginePi, "orcarouter/auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	if files.models == nil {
+		t.Fatal("pi orcarouter runs must declare the custom provider in models.json")
+	}
+	models, err := os.ReadFile(files.models.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsedModels struct {
+		Providers map[string]struct {
+			BaseURL string `json:"baseUrl"`
+			API     string `json:"api"`
+			APIKey  string `json:"apiKey"`
+			Models  []struct {
+				ID string `json:"id"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(models, &parsedModels); err != nil {
+		t.Fatalf("models.json is invalid: %v", err)
+	}
+	provider, ok := parsedModels.Providers["orcarouter"]
+	if !ok || provider.BaseURL != OrcaRouterBaseURL || provider.APIKey != "sk-orca-test" {
+		t.Fatalf("orcarouter provider = %#v", parsedModels.Providers)
+	}
+	if provider.API != "openai-completions" {
+		t.Fatalf("orcarouter api = %q, want the OpenAI-compatible chat completions wire API", provider.API)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].ID != "auto" {
+		t.Fatalf("orcarouter models = %#v, want exactly the auto model entry", provider.Models)
+	}
+	auth, err := os.ReadFile(files.auth.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsedAuth map[string]struct {
+		Type string `json:"type"`
+		Key  string `json:"key"`
+	}
+	if err := json.Unmarshal(auth, &parsedAuth); err != nil {
+		t.Fatalf("auth JSON is invalid: %v", err)
+	}
+	if entry, ok := parsedAuth["orcarouter"]; !ok || entry.Type != "api_key" || entry.Key != "sk-orca-test" {
+		t.Fatalf("orcarouter auth entry = %#v", parsedAuth)
+	}
+}
+
+func TestSandboxCommandForPiBindsCustomModels(t *testing.T) {
+	dir := t.TempDir()
+	mkfile := func(name string) *os.File {
+		t.Helper()
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { f.Close() })
+		return f
+	}
+	paths := sandboxRuntime{engine: EnginePi, bwrap: "bwrap", runtimeDir: dir, binary: sandboxPiRoot + "/bin/pi"}
+	checkout := filepath.Join(dir, "checkout")
+	dataDir := filepath.Join(dir, "xdg-data")
+	args := []string{"--version"}
+
+	without := sandboxCommand(paths, checkout, &sandboxFiles{config: mkfile("settings.json"), auth: mkfile("auth.json")}, dataDir, args)
+	if strings.Contains(strings.Join(without, " "), "models.json") {
+		t.Fatalf("Zen runs must not mount a custom model catalog, args = %q", without)
+	}
+	with := sandboxCommand(paths, checkout, &sandboxFiles{config: mkfile("settings.json"), auth: mkfile("auth.json"), models: mkfile("models.json")}, dataDir, args)
+	if !strings.Contains(strings.Join(with, " "), "--ro-bind-data 5 /pi-config/models.json") {
+		t.Fatalf("pi custom provider must arrive as read-only FD 5, args = %q", with)
 	}
 }
 

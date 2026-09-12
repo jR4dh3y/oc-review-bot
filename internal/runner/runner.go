@@ -209,7 +209,7 @@ func Run(ctx context.Context, o Options) (string, error) {
 		return "", fmt.Errorf("lock checkout: %w", err)
 	}
 
-	files, err := newSandboxFiles(tmp, o.APIKey, o.Engine)
+	files, err := newSandboxFiles(tmp, o.APIKey, o.Engine, o.Model)
 	if err != nil {
 		return "", err
 	}
@@ -237,7 +237,7 @@ func Run(ctx context.Context, o Options) (string, error) {
 	// The launcher must receive this sanitized environment too: a process in
 	// the sandbox can otherwise read its parent's environment through /proc.
 	cmd.Env = sandboxEnvironment(o.Engine)
-	cmd.ExtraFiles = []*os.File{files.config, files.auth}
+	cmd.ExtraFiles = files.extraFiles()
 	// Kill the whole process group: opencode2 spawns helper processes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout := &boundedBuffer{limit: maxAgentOutputBytes}
@@ -1082,7 +1082,10 @@ func makeReadOnly(dir string) error {
 	})
 }
 
-func openCodeConfig() map[string]any {
+// openCodeConfig builds the isolated opencode.json. A model naming the
+// orcarouter gateway additionally declares that custom provider; the Zen
+// provider needs no declaration because it is built in.
+func openCodeConfig(model string) map[string]any {
 	// OpenCode 2 uses ordered rules; broad defaults come first because the last
 	// matching rule wins.
 	permissions := []map[string]string{
@@ -1099,7 +1102,7 @@ func openCodeConfig() map[string]any {
 		{"action": "skill", "resource": "*", "effect": "deny"},
 		{"action": "question", "resource": "*", "effect": "deny"},
 	}
-	return map[string]any{
+	config := map[string]any{
 		"$schema":       "https://opencode.ai/config.json",
 		"default_agent": "reviewer",
 		"share":         "disabled",
@@ -1125,6 +1128,12 @@ func openCodeConfig() map[string]any {
 			},
 		},
 	}
+	if gatewayProviderForModel(model) == ProviderOrcaRouter {
+		config["provider"] = map[string]any{
+			ProviderOrcaRouter: openCodeOrcaRouterProvider(modelIDForProvider(model)),
+		}
+	}
+	return config
 }
 
 // ExtractText pulls the assistant's text out of `--format json` output. The

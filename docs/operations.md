@@ -43,8 +43,9 @@ OpenCode 2 beta CLI, rather than assuming a Docker image or a particular PaaS in
    `ZEN_DEFAULT_MODEL`, the active engine's runtime dir (`OPENCODE_RUNTIME_DIR` for the default
    `opencode2` engine, `PI_RUNTIME_DIR` when `REVIEW_ENGINE=pi`), and `BUBBLEWRAP_BIN`. Configure
    both OAuth values as well: startup permits them to be absent, but users cannot register or log
-   in without them. Select a model that is currently enabled for the deployed OpenCode/Zen
-   configuration; model catalogs change, so do not rely on a historical README example. Do not set
+   in without them. Select a model that is currently enabled for the deployed gateway
+   configuration (`opencode/…` models use OpenCode Zen, `orcarouter/…` models use OrcaRouter);
+   model catalogs change, so do not rely on a historical README example. Do not set
    `ADMIN_GITHUB_LOGINS`; a non-empty legacy login allowlist is explicitly rejected.
 
 ## Runtime configuration
@@ -79,11 +80,13 @@ also verify the runtime tree and Bubblewrap capability before executing untruste
 - Each pi review runs `pi --print` with a fixed, non-configurable flag set: model from the shared
   `provider/model` setting, a read-only tool allowlist (`read`, `grep`, `find`, `ls`), all
   project-local discovery disabled (extensions, skills, prompt templates, themes, context files,
-  project trust), no session persistence, and a safety system-prompt appendix. The pooled Zen key
-  is written to an isolated `auth.json` (`{"opencode":{"type":"api_key", ...}}`) under a per-run
-  `PI_CODING_AGENT_DIR` tmpfs and is never passed through the child environment. Startup
+  project trust), no session persistence, and a safety system-prompt appendix. The pooled key is
+  written to an isolated `auth.json` under a per-run `PI_CODING_AGENT_DIR` tmpfs, keyed by the
+  model's gateway provider (`{"opencode":{"type":"api_key", ...}}` for Zen; `orcarouter/…` models
+  additionally receive a per-run `models.json` declaring the custom OrcaRouter provider), and is
+  never passed through the child environment. Startup
   network noise (update checks, telemetry) is disabled with `PI_OFFLINE`, `PI_SKIP_VERSION_CHECK`,
-  and `PI_TELEMETRY=0`; only model traffic to Zen remains.
+  and `PI_TELEMETRY=0`; only model traffic to the configured gateway remains.
 - pi terminal execution failures surface in the dashboard and logs with the `pi_execution` cause
   instead of `opencode_execution`; quota/rate-limit handling and key cooldown are identical.
 
@@ -123,9 +126,9 @@ locking are designed for one service process; a network filesystem or multiple p
 same SQLite file is not a supported high-availability topology. On startup, interrupted queued and
 running reviews are requeued from the persistent database.
 
-Zen API keys are stored encrypted with AES-GCM using key material derived from `SESSION_SECRET`.
+Pooled API keys are stored encrypted with AES-GCM using key material derived from `SESSION_SECRET`.
 Keep the database and `SESSION_SECRET` together across restarts and restores. Rotating or losing
-that secret without a key re-encryption migration makes the stored Zen keys unrecoverable; retain a
+that secret without a key re-encryption migration makes the stored keys unrecoverable; retain a
 controlled backup before making a planned secret change. The database is not otherwise encrypted
 by the application, so use the platform's encrypted volume controls and narrow access to it.
 
@@ -168,7 +171,7 @@ longer than GitHub's normal redelivery window. After retention expires, the deli
 accepted again, but immutable trigger and active-review uniqueness constraints still prevent the
 same review event from creating an unsafe duplicate.
 
-## Zen key-pool governance
+## Key-pool governance
 
 OpenCode Zen is a usage-based provider that also lists rate-limited free models (IDs ending in
 `-free`); free models still consume the pooled keys' request quota and rate limits. Add API keys
@@ -176,13 +179,21 @@ only from accounts that are authorized to share the same workload, budget, and d
 boundary. The dashboard's per-key request counter is an operational scheduling metric; it is not a
 provider billing record or a way to bypass provider controls.
 
-On a recognized Zen quota, credit, or rate-limit response, the service puts that key on cooldown
+The pool serves one gateway at a time: the configured review model's provider prefix selects it
+(`opencode/…` for OpenCode Zen, `orcarouter/…` for OrcaRouter), and every key in the pool must be
+issued by that gateway. Key selection is least-used across the whole pool, so mixing gateways in
+one pool sends reviews with credentials the configured model cannot use; switch the model and the
+pool together.
+
+On a recognized quota, credit, or rate-limit response from either gateway, the service puts that
+key on cooldown
 for `ZEN_COOLDOWN_MINUTES` and can make one retry with another eligible key. Do not use multiple
 accounts or keys to work around quotas, credits, rate limits, spend controls, or provider terms.
 Configure the provider's own spend limits and monitor its billing dashboard independently.
 
 Only configured administrators can add, disable, or delete pooled keys. Promptly disable a key in
-the dashboard and rotate it at the provider if it is suspected of exposure. Do not put Zen keys in
+the dashboard and rotate it at the provider if it is suspected of exposure. Do not put pooled
+gateway keys in
 `.env`, CI secrets, repository configuration, or review prompts.
 
 ## Monitoring and rollout

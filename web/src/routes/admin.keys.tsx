@@ -153,10 +153,11 @@ function ZenKeyManager() {
   return (
     <Card aria-busy={keys.isFetching || add.isPending || patch.isPending || del.isPending}>
       <CardHeader>
-        <CardTitle as="h1">OpenCode Zen credentials</CardTitle>
+        <CardTitle as="h1">Gateway credentials</CardTitle>
         <CardDescription>
-          Credential values are encrypted at rest and never returned to the browser; only masked
-          suffixes appear here.
+          API keys for the configured review gateway — OpenCode Zen for <code>opencode/…</code>{" "}
+          models, OrcaRouter for <code>orcarouter/…</code> models. Credential values are encrypted
+          at rest and never returned to the browser; only masked suffixes appear here.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -188,7 +189,7 @@ function ZenKeyManager() {
             </div>
             <div className="grid gap-1.5">
               <label htmlFor="zen-key-secret" className="text-sm font-medium">
-                OpenCode Zen API key
+                Gateway API key
               </label>
               <Input
                 id="zen-key-secret"
@@ -238,7 +239,7 @@ function ZenKeyManager() {
             onRetry={() => void keys.refetch()}
           />
         ) : keys.data?.length ? (
-          <ul className="divide-y divide-zinc-100" aria-label="Saved OpenCode Zen credentials">
+          <ul className="divide-y divide-zinc-100" aria-label="Saved gateway credentials">
             {keys.data.map((key) => {
               const cooling =
                 key.cooldown_until != null && new Date(key.cooldown_until) > new Date();
@@ -331,7 +332,8 @@ function ZenKeyManager() {
           <div className="rounded-md border border-dashed border-zinc-300 p-4 text-sm text-zinc-600">
             <p className="font-medium text-zinc-900">No credentials saved.</p>
             <p className="mt-1">
-              Add an organization-authorized OpenCode Zen API key to enable reviews.
+              Add an organization-authorized gateway API key that matches the configured review
+              model to enable reviews.
             </p>
           </div>
         )}

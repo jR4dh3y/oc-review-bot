@@ -68,7 +68,8 @@ function Landing() {
             </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-zinc-600">
-            Administrators manage organization-authorized OpenCode Zen credentials. Provider pricing,
+            Administrators manage organization-authorized gateway credentials (OpenCode Zen or
+            OrcaRouter). Provider pricing,
             capacity, and account limits still apply.
           </CardContent>
         </Card>

@@ -1,8 +1,9 @@
 # samik-bot
 
 Greptile/CodeRabbit-style PR review bot. Mention `@samik-bot` in a PR comment and it runs a
-reviewer coding agent against the PR diff using a pool of organization-authorized OpenCode Zen API
-keys, then posts one summary comment plus inline findings pinned to diff lines. The reviewer engine
+reviewer coding agent against the PR diff using a pool of organization-authorized OpenCode Zen or
+OrcaRouter API keys, then posts one summary comment plus inline findings pinned to diff lines. The
+reviewer engine
 is configuration: the default is [OpenCode 2 beta](https://opencode.ai/v2/docs) (`opencode2`), or
 the lightweight, extensible [pi coding agent](https://github.com/earendil-works/pi) (`pi`), which
 keeps using the same Zen credentials. The summary includes a Mermaid sequence diagram and precedes
@@ -117,6 +118,27 @@ PI_BIN=/opt/pi-runtime/bin/pi mise exec -- make pi-check
 resolves the built-in `opencode` (Zen) provider from the isolated credential store without calling
 a model.
 
+### Routing reviews through OrcaRouter
+
+The review model's provider prefix selects the gateway that receives the pooled key. `opencode/…`
+models keep the engines' built-in OpenCode Zen provider; `orcarouter/…` models route through
+[OrcaRouter](https://www.orcarouter.ai) — an OpenAI-compatible gateway at
+`https://api.orcarouter.ai/v1` — and need OrcaRouter keys in the pool. Set the model with
+`ZEN_DEFAULT_MODEL` (for example `orcarouter/auto`) or at `/admin/settings`, then add keys issued
+by that gateway at `/admin/keys`. Keep the pool and the configured model on one gateway: key
+selection is least-used across the whole pool, so a mixed pool hands reviews credentials from the
+wrong provider. Quota detection and `ZEN_COOLDOWN_MINUTES` cooldowns apply to either gateway.
+
+The gateway is provisioned per run inside the review sandbox; nothing is added to the host
+environment and the key never enters the child environment or the provider block:
+
+- `opencode2` receives a custom `orcarouter` provider in its isolated `opencode.json`
+  (`@ai-sdk/openai-compatible` pointed at `https://api.orcarouter.ai/v1`) and the pooled key in the
+  isolated auth store under that provider ID.
+- pi receives a custom `orcarouter` provider in `models.json` under its isolated
+  `PI_CODING_AGENT_DIR` (`baseUrl` plus the OpenAI-compatible chat-completions API), alongside the
+  same provider-keyed auth-store credential.
+
 Build and verify the frontend plus single binary:
 
 ```bash
@@ -199,7 +221,7 @@ commenters get a register-here reply.
 | `ALLOWED_GITHUB_INSTALLATION_IDS` | yes | — | Comma-separated numeric GitHub App installation IDs; each review target must match |
 | `ALLOWED_GITHUB_REPOSITORY_IDS` | yes | — | Comma-separated numeric GitHub repository IDs; each review target must match |
 | `BOT_USERNAME` | no | `samik-bot` | Valid GitHub login without `@`; mention trigger is case-insensitive |
-| `ZEN_DEFAULT_MODEL` | yes | — | Current enabled `provider/model` identifier; initial value, overridable at `/admin/settings` |
+| `ZEN_DEFAULT_MODEL` | yes | — | Current enabled `provider/model` identifier; initial value, overridable at `/admin/settings`. The provider prefix selects the gateway: `opencode/…` (OpenCode Zen, the default) or `orcarouter/…` (OrcaRouter); the key pool must match that gateway |
 | `REVIEW_CONCURRENCY` | no | `2` | Worker pool size; must be at least 1 |
 | `REVIEW_TIMEOUT_MINUTES` | no | `20` | Per-review hard timeout; must be at least 1 |
 | `ZEN_COOLDOWN_MINUTES` | no | `60` | Cooldown after a Zen quota/rate-limit error; must be at least 1 |
