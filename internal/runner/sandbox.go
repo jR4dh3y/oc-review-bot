@@ -27,6 +27,7 @@ const (
 	sandboxDiffPath     = sandboxWorkspace + "/review-diff.patch"
 	configFD            = 3
 	authFD              = 4
+	modelsFD            = 5
 
 	sandboxHomeTmpfsSize      = "16777216" // 16 MiB
 	sandboxConfigTmpfsSize    = "8388608"  // 8 MiB
@@ -46,9 +47,12 @@ type sandboxRuntime struct {
 
 // sandboxFiles are passed as read-only file descriptors, rather than mounting
 // their host directory, so the sandbox cannot discover adjacent host files.
+// models is optional: pi needs it only when the run's model names a custom
+// provider that must be declared in PI_CODING_AGENT_DIR/models.json.
 type sandboxFiles struct {
 	config *os.File
 	auth   *os.File
+	models *os.File
 }
 
 func (f *sandboxFiles) Close() {
@@ -61,11 +65,27 @@ func (f *sandboxFiles) Close() {
 	if f.auth != nil {
 		_ = f.auth.Close()
 	}
+	if f.models != nil {
+		_ = f.models.Close()
+	}
+}
+
+// extraFiles returns the descriptors in FD order: config is 3, auth is 4,
+// and models is 5 when present.
+func (f *sandboxFiles) extraFiles() []*os.File {
+	files := []*os.File{f.config, f.auth}
+	if f.models != nil {
+		files = append(files, f.models)
+	}
+	return files
 }
 
 // Preflight verifies that the configured runtime can be launched inside the
-// same Bubblewrap profile used for reviews. It performs no model request.
-func Preflight(bin, runtimeDir, bubblewrapBin, engine string) error {
+// same Bubblewrap profile used for reviews. It performs no model request. The
+// default model is staged so the pi catalog probe resolves the gateway
+// provider that deployment will actually run; reviews with a dashboard-set
+// model of another provider are exercised at review time.
+func Preflight(bin, runtimeDir, bubblewrapBin, engine, model string) error {
 	if engine == "" {
 		engine = EngineOpenCode2
 	}
@@ -100,21 +120,22 @@ func Preflight(bin, runtimeDir, bubblewrapBin, engine string) error {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 	}
-	// The pi catalog probe proves the staged agent resolves the OpenCode Zen
-	// provider and the isolated credential store without a model request.
+	// The pi catalog probe proves the staged agent resolves the configured
+	// gateway provider and the isolated credential store without a model
+	// request.
 	probes := [][]string{{"--version"}, {"run", "--standalone", "--help"}}
 	if engine == EnginePi {
-		probes = [][]string{{"--version"}, {"--list-models", "opencode"}}
+		probes = [][]string{{"--version"}, {"--list-models", gatewayProviderForModel(model)}}
 	}
 	for _, probe := range probes {
-		files, err := newSandboxFiles(tmp, "preflight", engine)
+		files, err := newSandboxFiles(tmp, "preflight", engine, model)
 		if err != nil {
 			return fmt.Errorf("%w: prepare capability probe", ErrSandboxUnavailable)
 		}
 		cmd := exec.CommandContext(ctx, paths.bwrap, sandboxCommand(paths, checkout, files, dataDir, probe)...)
 		cmd.Dir = tmp
 		cmd.Env = sandboxEnvironment(engine)
-		cmd.ExtraFiles = []*os.File{files.config, files.auth}
+		cmd.ExtraFiles = files.extraFiles()
 		runErr := cmd.Run()
 		files.Close()
 		if runErr != nil {
@@ -345,34 +366,51 @@ func pathWithin(root, path string) bool {
 	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func newSandboxFiles(tmp, apiKey, engine string) (*sandboxFiles, error) {
+// newSandboxFiles provisions the per-run engine configuration and credential
+// stores. The pooled key is presented as the credential of the gateway the
+// run's model names: the built-in "opencode" (Zen) provider, or the custom
+// "orcarouter" provider declared alongside it.
+func newSandboxFiles(tmp, apiKey, engine, model string) (*sandboxFiles, error) {
 	secretsDir := filepath.Join(tmp, "sandbox-files")
 	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
 		return nil, err
 	}
+	provider := gatewayProviderForModel(model)
 	if engine == EnginePi {
 		// pi reads global settings and credentials from PI_CODING_AGENT_DIR:
-		// an empty trust decision plus a disabled telemetry ping. The pooled
-		// Zen key is presented as the built-in "opencode" provider credential.
+		// an empty trust decision plus a disabled telemetry ping.
 		config, err := jsonConfigFile(filepath.Join(secretsDir, "settings.json"), piSettings())
 		if err != nil {
 			return nil, err
 		}
-		auth, err := jsonConfigFile(filepath.Join(secretsDir, "auth.json"), map[string]any{
-			"opencode": map[string]string{"type": "api_key", "key": apiKey},
+		files := &sandboxFiles{config: config}
+		files.auth, err = jsonConfigFile(filepath.Join(secretsDir, "auth.json"), map[string]any{
+			provider: map[string]string{"type": "api_key", "key": apiKey},
 		})
 		if err != nil {
 			_ = config.Close()
 			return nil, err
 		}
-		return &sandboxFiles{config: config, auth: auth}, nil
+		if provider == ProviderOrcaRouter {
+			// The key is deliberately present in both stores: pi's documented
+			// custom-provider path reads the models.json apiKey, while the
+			// provider-keyed auth.json is the credential store the Zen path
+			// uses. Both files are per-run, FD-passed, and tmpfs-backed, so the
+			// duplicate does not widen the key's exposure.
+			files.models, err = jsonConfigFile(filepath.Join(secretsDir, "models.json"), piOrcaRouterModels(apiKey, modelIDForProvider(model)))
+			if err != nil {
+				files.Close()
+				return nil, err
+			}
+		}
+		return files, nil
 	}
-	config, err := jsonConfigFile(filepath.Join(secretsDir, "opencode.json"), openCodeConfig())
+	config, err := jsonConfigFile(filepath.Join(secretsDir, "opencode.json"), openCodeConfig(model))
 	if err != nil {
 		return nil, err
 	}
 	auth, err := jsonConfigFile(filepath.Join(secretsDir, "auth.json"), map[string]any{
-		"opencode": map[string]string{"type": "api", "key": apiKey},
+		provider: map[string]string{"type": "api", "key": apiKey},
 	})
 	if err != nil {
 		_ = config.Close()
@@ -471,6 +509,11 @@ func sandboxCommand(paths sandboxRuntime, checkout string, files *sandboxFiles, 
 			"--size", sandboxStateTmpfsSize,
 			"--tmpfs", "/xdg-data",
 		)
+		if files.models != nil {
+			args = append(args,
+				"--ro-bind-data", fmt.Sprint(modelsFD), sandboxPiConfig+"/models.json",
+			)
+		}
 	} else {
 		args = append(args,
 			"--dir", "/xdg-config/opencode",

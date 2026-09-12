@@ -62,8 +62,10 @@ function SettingsForm() {
       <CardHeader>
         <CardTitle as="h1">Review settings</CardTitle>
         <CardDescription>
-          Set the OpenCode Zen model ID applied to new reviews. Model availability, pricing, and
-          account limits are managed by Zen.
+          Set the model ID applied to new reviews, in provider/model form. Only{" "}
+          <code>orcarouter/…</code> models route through OrcaRouter; every other valid provider/model
+          ID uses the built-in OpenCode Zen provider. Model availability, pricing, and account limits
+          are managed by that gateway.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid max-w-md gap-3">
@@ -97,7 +99,8 @@ function SettingsForm() {
                 }}
               />
               <p id="default-model-help" className="text-xs text-zinc-500">
-                Use a model identifier available to your organization’s Zen account.
+                Use a model identifier enabled for your organization on the selected gateway, and
+                keep the key pool on that gateway.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
