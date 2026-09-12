@@ -105,6 +105,10 @@ func spaHandler(spa embed.FS) http.Handler {
 						return
 					}
 				}
+				// index.html references content-hashed assets, so it must always
+				// revalidate: a cached document would pin browsers to an old bundle
+				// after every new binary.
+				w.Header().Set("Cache-Control", "no-store")
 				http.ServeContent(w, r, "index.html", time.Now(), mustIndex(subtree))
 			})
 		}
