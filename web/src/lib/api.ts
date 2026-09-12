@@ -19,7 +19,16 @@ export interface ReviewListItem {
   error: string;
   summary_comment_id: number;
   created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
   findings_count: number;
+}
+
+export interface ReviewEvent {
+  id: number;
+  kind: string;
+  message: string;
+  created_at: string;
 }
 
 export interface Finding {
@@ -56,11 +65,13 @@ interface FindingResponse {
 export interface ReviewDetail {
   review: ReviewListItem;
   findings: Finding[];
+  events: ReviewEvent[];
 }
 
 interface ReviewDetailResponse {
   review: ReviewListItem;
   findings: FindingResponse[] | null;
+  events?: ReviewEvent[] | null;
 }
 
 export interface ZenKey {
@@ -179,7 +190,11 @@ export const api = {
   reviews: () => req<ReviewListItem[]>("/api/reviews"),
   reviewDetail: async (id: number | string): Promise<ReviewDetail> => {
     const detail = await req<ReviewDetailResponse>(`/api/reviews/${id}`);
-    return { review: detail.review, findings: (detail.findings ?? []).map(normalizeFinding) };
+    return {
+      review: detail.review,
+      findings: (detail.findings ?? []).map(normalizeFinding),
+      events: detail.events ?? [],
+    };
   },
   keys: () => req<ZenKey[]>("/api/admin/keys"),
   addKey: (label: string, secret: string) =>
