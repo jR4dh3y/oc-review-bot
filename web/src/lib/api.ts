@@ -68,6 +68,21 @@ export interface ReviewDetail {
   events: ReviewEvent[];
 }
 
+export interface PartnerInfo {
+  referral_code: string;
+  referral_url: string;
+  app_name: string;
+  callback_url: string;
+  api_base_url: string;
+  listing_repo: string;
+  connect_script: string;
+  connect_script_integrity: string;
+}
+
+export interface ConnectURLResponse {
+  auth_url: string;
+}
+
 interface ReviewDetailResponse {
   review: ReviewListItem;
   findings: FindingResponse[] | null;
@@ -187,6 +202,8 @@ function normalizeFinding(finding: FindingResponse): Finding {
 export const api = {
   me: () => req<Me>("/api/me"),
   meta: () => req<Meta>("/api/meta"),
+  partner: () => req<PartnerInfo>("/api/admin/partner"),
+  orcaConnectURL: () => req<ConnectURLResponse>("/orca/connect-url"),
   reviews: () => req<ReviewListItem[]>("/api/reviews"),
   reviewDetail: async (id: number | string): Promise<ReviewDetail> => {
     const detail = await req<ReviewDetailResponse>(`/api/reviews/${id}`);
